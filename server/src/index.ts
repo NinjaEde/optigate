@@ -29,11 +29,21 @@ async function resolveAuth(request: { headers: Record<string, unknown> }) {
   }
 
   if (process.env.AUTH_MODE === 'dev') {
-    // deterministic dev identity so local flows work without Keycloak
+    // Deterministic dev identity so local flows work without Keycloak.
+    // Optional headers allow simulating different users/tenants/roles
+    // (useful for testing scope visibility without a real IdP).
+    const DEV_ROLES = ['superadmin', 'admin', 'user'] as const;
+    type DevRole = (typeof DEV_ROLES)[number];
+
+    const roleHeader = String(request.headers['x-dev-role'] ?? '');
+    const role: DevRole = DEV_ROLES.includes(roleHeader as DevRole)
+      ? (roleHeader as DevRole)
+      : 'superadmin';
+
     return {
-      userId: 'dev-user',
-      role: 'superadmin' as const,
-      tenantId: 'dev-tenant',
+      userId: String(request.headers['x-dev-user'] ?? 'dev-user'),
+      role,
+      tenantId: String(request.headers['x-dev-tenant'] ?? 'dev-tenant'),
     };
   }
 
