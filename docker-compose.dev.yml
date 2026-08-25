@@ -1,0 +1,62 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: optigate
+      POSTGRES_PASSWORD: optigate
+      POSTGRES_DB: mcp_registry
+    volumes:
+      - pgdata_dev:/var/lib/postgresql/data
+    ports:
+      - '5434:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U optigate -d mcp_registry']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  server:
+    image: node:24-alpine
+    working_dir: /app/server
+    # tsx watch = restart on every .ts change; no image rebuild needed
+    command: sh -c "npm install --no-audit --no-fund && npx tsx watch --clear-screen=false src/index.ts"
+    environment:
+      NODE_ENV: development
+      PORT: 8100
+      AUTH_MODE: dev
+      APPROVAL_REQUIRED: 'false'
+      DATABASE_URL: postgres://optigate:optigate@db:5432/mcp_registry
+      CHOKIDAR_USEPOLLING: 'true' # reliable file watching across the macOS Docker mount
+      SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:-dev-only-secret-key}
+    volumes:
+      - ./server:/app/server
+      - ./tsconfig.base.json:/app/tsconfig.base.json
+      # stdio-Server: lokale Projekte im Container verfügbar machen
+      - /Users/edgarkoenig/workspace:/Users/edgarkoenig/workspace
+      - server_node_modules:/app/server/node_modules # keep container deps isolated from host
+    ports:
+      - '8100:8100'
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    image: node:24-alpine
+    working_dir: /app/web
+    # vite dev server = instant HMR on every source change
+    command: sh -c "npm install --no-audit --no-fund && npm run dev -- --host"
+    environment:
+      NODE_ENV: development
+      CHOKIDAR_USEPOLLING: 'true'
+    volumes:
+      - ./web:/app/web
+      - web_node_modules:/app/web/node_modules # keep container deps isolated from host
+    ports:
+      - '3030:5173'
+    depends_on:
+      - server
+
+volumes:
+  pgdata_dev:
+  server_node_modules:
+  web_node_modules:

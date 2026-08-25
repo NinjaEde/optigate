@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+
+# Builds
+server/dist/
+web/dist/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+.vscode/
+*.swp
+
+# Test artifacts
+coverage/
+
+# TypeScript incremental builds
+*.tsbuildinfo
+
+# Internal design docs
+doku/
+
+# Docker compose override
+docker-compose.override.yml

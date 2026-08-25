@@ -1,0 +1,52 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: optigate
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-optigate}
+      POSTGRES_DB: mcp_registry
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U optigate -d mcp_registry']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    environment:
+      NODE_ENV: production
+      PORT: 8100
+      AUTH_MODE: keycloak
+      KEYCLOAK_URL: ${KEYCLOAK_URL:-https://auth.kio-space.de}
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-kio-space}
+      APPROVAL_REQUIRED: ${APPROVAL_REQUIRED:-true}
+      DATABASE_URL: postgres://optigate:${POSTGRES_PASSWORD:-optigate}@db:5432/mcp_registry
+    ports:
+      - '8100:8100'
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://localhost:8100/health']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    ports:
+      - '8080:80'
+    depends_on:
+      - server
+    restart: unless-stopped
+
+volumes:
+  pgdata:
