@@ -11,6 +11,7 @@ import { encryptSecret } from './infra/secrets/secretVault.js';
 import { sanitizeAuthForClient } from './infra/mcp/authHeaders.js';
 import { createMcpGateway } from './infra/mcp/gateway.js';
 import { ToolIndexReconciler } from './infra/mcp/toolIndexReconciler.js';
+import { CredentialResolver } from './infra/mcp/credentialResolver.js';
 import type {
   AuthContext,
   MCPServer,
@@ -26,6 +27,8 @@ export interface AppOptions {
     audit: AuditSink & { recent?: (limit?: number) => Promise<unknown[]> };
   };
   pool: McpClientPool;
+  /** Per-tenant credential bindings (isolation border, see multi-tenancy doc). */
+  credentials: CredentialResolver;
   approvalRequired: boolean;
 }
 
@@ -37,6 +40,11 @@ const registerSchema = {
       name: { type: 'string', minLength: 1, maxLength: 100 },
       description: { type: 'string', maxLength: 2000 },
       scope: { enum: ['global', 'tenant', 'private'] },
+      /**
+       * Only superadmins; stdio servers cannot be shared. Validated in
+       * RegistryService.assertShared.
+       */
+      shared: { type: 'boolean' },
       transport: { enum: ['stdio', 'streamable_http', 'sse'] },
       connection: {
         type: 'object',
@@ -118,7 +126,13 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
   const toolIndexReconciler = new ToolIndexReconciler(
     {
       allActiveServers: () => options.registry.repo.allActive(),
-      syncTools: (server) => options.pool.syncTools(server),
+      // reconciler runs as system process → default credential scope
+      syncTools: (server) =>
+        options.pool.syncTools(server, {
+          userId: 'system',
+          role: 'superadmin',
+          tenantId: null,
+        }),
       onIndexUpdated: (index) => {
         toolsByServer.clear();
         for (const [id, tools] of index) {
@@ -231,6 +245,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
         name: string;
         description?: string;
         scope: 'global' | 'tenant' | 'private';
+        shared?: boolean;
         transport: 'stdio' | 'streamable_http' | 'sse';
         connection: Record<string, never>;
       };
@@ -240,6 +255,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
           name: body.name,
           description: body.description ?? '',
           scope: body.scope,
+          shared: body.shared,
           transport: body.transport,
           connection: processIncomingConnection(
             body.connection,
@@ -314,8 +330,9 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       const result = toClientResponse(
         await registry.disableServer(getAuth(request), id),
       );
-      // disabled = out of operation: drop connection + tools immediately
-      await options.pool.disconnect(id);
+      // disabled = out of operation: drop connection + tools immediately.
+      // Admin action → drop ALL tenant connections of this server.
+      await options.pool.disconnectAll(id);
       toolsByServer.delete(id);
       return result;
     } catch (err) {
@@ -337,12 +354,19 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
   });
 
   // ── Disconnect: close the pool connection and drop cached tools ───────
+  // Superadmin disconnects ALL tenant connections; everyone else only
+  // their own tenant scope.
   app.post('/api/servers/:id/disconnect', async (request, reply) => {
     const { id } = request.params as { id: string };
     try {
-      const server = await registry.getVisibleServer(getAuth(request), id);
+      const auth = getAuth(request);
+      const server = await registry.getVisibleServer(auth, id);
 
-      await options.pool.disconnect(server.id);
+      if (auth.role === 'superadmin') {
+        await options.pool.disconnectAll(server.id);
+      } else {
+        await options.pool.disconnect(server.id, auth);
+      }
       toolsByServer.delete(server.id);
       await registry.markStatus(
         getAuth(request),
@@ -387,7 +411,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     }
 
     try {
-      const tools = await options.pool.syncTools(server);
+      const tools = await options.pool.syncTools(server, getAuth(request));
       toolsByServer.set(id, tools);
 
       await registry.markStatus(
@@ -416,7 +440,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     const { id } = request.params as { id: string };
     try {
       const server = await registry.getVisibleServer(getAuth(request), id);
-      const tools = await options.pool.syncTools(server);
+      const tools = await options.pool.syncTools(server, getAuth(request));
       toolsByServer.set(id, tools);
       return { tools };
     } catch (err) {
@@ -478,11 +502,134 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
         return;
       }
 
-      const result = await options.pool.callTool(server, tool_name, args ?? {});
+      const result = await options.pool.callTool(
+        server,
+        getAuth(request),
+        tool_name,
+        args ?? {},
+      );
       return { result };
     } catch (err) {
       reply.code(502).send({ error: (err as Error).message });
     }
+  });
+
+  // ── Per-tenant credential bindings ────────────────────────────────────
+  //
+  // Shared servers are visible platform-wide, but each tenant connects with
+  // its own credentials. Rules:
+  //   - superadmin may manage bindings for any tenant
+  //   - admin may manage bindings ONLY for their own tenant
+  //   - secrets are stored encrypted (secretPlaintext → secretEnc) and
+  //     never returned to clients; only secretRef names are visible.
+
+  interface IncomingBinding {
+    auth?: {
+      type?: string;
+      secretRef?: string;
+      secretPlaintext?: string;
+      headerName?: string;
+    };
+  }
+
+  app.get('/api/servers/:id/bindings', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const auth = getAuth(request);
+
+    try {
+      await registry.getVisibleServer(auth, id);
+
+      if (auth.role !== 'superadmin' && auth.role !== 'admin') {
+        reply.code(403).send({ error: 'Only admins may view credential bindings' });
+        return;
+      }
+
+      const bindings = options.credentials.listBindings(id).map((b) => ({
+        serverId: b.serverId,
+        tenantId: b.tenantId,
+        isDefault: b.tenantId === null,
+        authType: b.auth.type,
+        secretRef: b.auth.secretRef ?? null,
+        // never expose secretEnc / plaintext values
+      }));
+      return { bindings };
+    } catch (err) {
+      reply.code(404).send({ error: (err as Error).message });
+    }
+  });
+
+  app.put('/api/servers/:id/bindings/:tenantId', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    // "default" in the URL maps to the null default binding
+    const rawTenant = (request.params as { tenantId: string }).tenantId;
+    const tenantId = rawTenant === 'default' ? null : rawTenant;
+    const auth = getAuth(request);
+    const body = request.body as IncomingBinding | undefined;
+
+    if (!body?.auth?.type) {
+      reply.code(400).send({ error: 'auth object with a type is required' });
+      return;
+    }
+
+    if (auth.role === 'admin' && auth.tenantId !== tenantId) {
+      reply.code(403).send({
+        error: 'Admins may only manage bindings for their own tenant',
+      });
+      return;
+    }
+    if (auth.role !== 'superadmin' && auth.role !== 'admin') {
+      reply.code(403).send({ error: 'Only admins may manage credential bindings' });
+      return;
+    }
+
+    try {
+      const incoming = body.auth as Record<string, unknown>;
+      const stored: Record<string, unknown> = { type: incoming.type };
+
+      if (incoming.secretPlaintext) {
+        const enc = encryptSecret(String(incoming.secretPlaintext));
+        if (!enc) {
+          throw new Error(
+            'Direct secret entry requires SECRET_ENCRYPTION_KEY to be configured',
+          );
+        }
+        stored.secretEnc = enc;
+      } else if (incoming.secretRef) {
+        stored.secretRef = incoming.secretRef;
+      }
+      if (typeof incoming.headerName === 'string') {
+        stored.headerName = incoming.headerName;
+      }
+
+      options.credentials.setBinding(id, tenantId || null, stored as never);
+      triggerReconcile();
+
+      reply.code(201).send({
+        serverId: id,
+        tenantId: tenantId || null,
+        authType: incoming.type,
+        secretRef: incoming.secretRef ?? null,
+      });
+    } catch (err) {
+      reply.code(400).send({ error: (err as Error).message });
+    }
+  });
+
+  app.delete('/api/servers/:id/bindings/:tenantId', async (request, reply) => {
+    const { id, tenantId } = request.params as { id: string; tenantId: string };
+    const auth = getAuth(request);
+
+    if (auth.role !== 'superadmin') {
+      reply.code(403).send({ error: 'Only superadmins may delete bindings' });
+      return;
+    }
+
+    const deleted = options.credentials.deleteBinding(id, tenantId || null);
+    if (!deleted) {
+      reply.code(404).send({ error: 'No such binding' });
+      return;
+    }
+    reply.code(204).send();
   });
 
   // ── Audit feed ────────────────────────────────────────────────────────
@@ -526,8 +673,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       const { searchTools } = await import('./domain/toolSearch.js');
       return searchTools(tools, query, limit);
     },
-    callTool: (server, toolName, args) =>
-      options.pool.callTool(server, toolName, args),
+    callTool: (server, auth, toolName, args) =>
+      options.pool.callTool(server, auth, toolName, args),
   });
 
   app.post('/mcp', async (request, reply) => {

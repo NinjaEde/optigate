@@ -4,6 +4,7 @@ import { buildApp } from '../../src/app';
 import { InMemoryServerRepository } from '../../src/infra/repositories/memoryServerRepository';
 import { InMemoryAuditLog } from '../../src/infra/repositories/memoryAuditLog';
 import { McpClientPool } from '../../src/infra/mcp/clientPool';
+import { CredentialResolver } from '../../src/infra/mcp/credentialResolver';
 import type { AuthContext } from '../../src/domain/types';
 
 const ADMIN = { userId: 'u1', role: 'admin', tenantId: 't1' };
@@ -29,6 +30,7 @@ async function makeApp() {
     pool: new McpClientPool(async () => {
       throw new Error('no transports in test');
     }),
+    credentials: new CredentialResolver(),
     approvalRequired: false,
   });
   await app.ready();

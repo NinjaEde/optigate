@@ -30,6 +30,7 @@ export interface GatewayOptions {
     | Promise<Array<ToolMeta & { serverName: string; score: number }>>;
   callTool(
     server: MCPServer,
+    auth: AuthContext,
     toolName: string,
     args: Record<string, unknown>,
   ): Promise<unknown>;
@@ -133,7 +134,7 @@ export function createMcpGateway(options: GatewayOptions) {
             throw new Error(`Server "${server.name}" is ${server.status}`);
           }
 
-          const result = await options.callTool(server, tool_name, args ?? {});
+          const result = await options.callTool(server, auth, tool_name, args ?? {});
 
           return {
             content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],

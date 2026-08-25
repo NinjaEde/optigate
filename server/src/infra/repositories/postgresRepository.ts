@@ -16,6 +16,7 @@ interface ServerRow {
   description: string;
   scope: MCPServer['scope'];
   owner_id: string | null;
+  shared: boolean;
   transport: MCPServer['transport'];
   connection: MCPServer['connection'];
   status: MCPServer['status'];
@@ -32,6 +33,7 @@ function rowToServer(row: ServerRow): MCPServer {
     name: row.name,
     description: row.description,
     scope: row.scope,
+    shared: row.shared,
     ownerId: row.owner_id,
     transport: row.transport,
     connection: row.connection,
@@ -64,9 +66,9 @@ export class PostgresServerRepository implements ServerRepository {
   async insert(server: MCPServer): Promise<void> {
     await this.pool.query(
       `INSERT INTO mcp_servers
-       (id, tenant_id, name, description, scope, owner_id, transport,
+       (id, tenant_id, name, description, scope, owner_id, shared, transport,
         connection, status, created_by, created_at, updated_at, deleted_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
       [
         server.id,
         server.tenantId,
@@ -74,6 +76,7 @@ export class PostgresServerRepository implements ServerRepository {
         server.description,
         server.scope,
         server.ownerId,
+        server.shared,
         server.transport,
         JSON.stringify(server.connection),
         server.status,
@@ -117,8 +120,9 @@ export class PostgresServerRepository implements ServerRepository {
     await this.pool.query(
       `UPDATE mcp_servers SET
          tenant_id = $2, name = $3, description = $4, scope = $5,
-         owner_id = $6, transport = $7, connection = $8, status = $9,
-         created_by = $10, created_at = $11, updated_at = $12, deleted_at = $13
+         owner_id = $6, shared = $7, transport = $8, connection = $9,
+         status = $10, created_by = $11, created_at = $12, updated_at = $13,
+         deleted_at = $14
        WHERE id = $1`,
       [
         server.id,
@@ -127,6 +131,7 @@ export class PostgresServerRepository implements ServerRepository {
         server.description,
         server.scope,
         server.ownerId,
+        server.shared,
         server.transport,
         JSON.stringify(server.connection),
         server.status,
@@ -171,6 +176,19 @@ function migrationSql(): string {
         detail     JSONB NOT NULL DEFAULT '{}'
     );
     CREATE INDEX IF NOT EXISTS idx_audit_events_time ON audit_events (at DESC);
+
+    ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS shared BOOLEAN NOT NULL DEFAULT false;
+
+    CREATE TABLE IF NOT EXISTS server_credential_bindings (
+        id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        server_id   UUID NOT NULL REFERENCES mcp_servers(id),
+        tenant_id   TEXT,
+        auth_enc    JSONB NOT NULL,
+        created_by  TEXT NOT NULL,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_sc_bindings_server_tenant
+        ON server_credential_bindings (server_id, coalesce(tenant_id, ''));
   `;
 }
 

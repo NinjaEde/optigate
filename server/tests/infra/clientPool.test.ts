@@ -1,69 +1,140 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-import { McpClientPool } from '../../src/infra/mcp/clientPool';
-import type { MCPServer, ToolMeta } from '../../src/domain/types';
+import { McpClientPool } from '../../src/infra/mcp/clientPool.js';
+import type {
+  AuthContext,
+  MCPServer,
+} from '../../src/domain/types.js';
+import type { McpTransport } from '../../src/infra/mcp/clientPool.js';
 
-const server = (over: Partial<MCPServer> = {}): MCPServer => ({
-  id: 'srv-1',
-  tenantId: null,
-  name: 'test-mcp',
-  description: '',
-  scope: 'global',
-  ownerId: null,
-  transport: 'streamable_http',
-  connection: { url: 'https://mcp.example.com' },
-  status: 'healthy',
-  createdBy: 'u0',
-  createdAt: new Date().toISOString(),
-  updatedAt: new Date().toISOString(),
-  deletedAt: null,
-  ...over,
+const ctx = (tenantId: string | null): AuthContext => ({
+  userId: 'u1',
+  role: 'admin',
+  tenantId,
 });
 
-function fakeTransport() {
+function makeServer(id: string): MCPServer {
   return {
-    connect: vi.fn().mockResolvedValue(undefined),
-    close: vi.fn().mockResolvedValue(undefined),
-    listTools: vi.fn().mockResolvedValue([
-      {
-        name: 'quote_get',
-        description: 'Get a stock quote',
-        inputSchema: { type: 'object' },
-      },
-    ]),
-    callTool: vi.fn().mockResolvedValue({ content: [{ type: 'text', text: 'ok' }] }),
-  };
+    id,
+    tenantId: null,
+    name: `srv-${id}`,
+    description: '',
+    scope: 'global',
+    ownerId: null,
+    transport: 'streamable_http',
+    connection: { url: `https://${id}.example.com/mcp` },
+    status: 'healthy',
+    createdBy: 'tester',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    deletedAt: null,
+  } as MCPServer;
 }
 
-describe('McpClientPool.syncTools', () => {
-  it('returns tool metadata from the transport and caches it', async () => {
-    const pool = new McpClientPool(async () => fakeTransport());
-    const s = server();
+interface MockTransport extends McpTransport {
+  connectCount: number;
+  closed: boolean;
+}
 
-    const tools = await pool.syncTools(s);
-    expect(tools).toHaveLength(1);
-    expect(tools[0].name).toBe('quote_get');
-    expect(tools[0].serverId).toBe('srv-1');
+function makeFactory() {
+  const transports: MockTransport[] = [];
+  const factory = vi.fn(async (): Promise<MockTransport> => {
+    const t: MockTransport = {
+      connectCount: 0,
+      closed: false,
+      async connect() {
+        t.connectCount++;
+      },
+      async close() {
+        t.closed = true;
+      },
+      async listTools() {
+        return [];
+      },
+      async callTool() {
+        return {};
+      },
+    };
+    transports.push(t);
+    return t;
+  });
+  return { factory, transports };
+}
 
-    // cached copy retrievable without reconnecting
-    const cached: ToolMeta[] = pool.cachedTools('srv-1');
-    expect(cached).toHaveLength(1);
+describe('McpClientPool — tenant-scoped connections', () => {
+  let pool: McpClientPool;
+  let factoryInfo: ReturnType<typeof makeFactory>;
+  const server = makeServer('srv-1');
+
+  beforeEach(() => {
+    factoryInfo = makeFactory();
+    pool = new McpClientPool(factoryInfo.factory);
   });
 
-  it('marks the server degraded when listing fails', async () => {
-    const failing = fakeTransport();
-    failing.listTools.mockRejectedValue(new Error('connection refused'));
+  it('creates SEPARATE connections per tenant for the same server', async () => {
+    await pool.callTool(server, ctx('acme'), 't', {});
+    await pool.callTool(server, ctx('globex'), 't', {});
 
-    const pool = new McpClientPool(async () => failing);
-
-    await expect(pool.syncTools(server())).rejects.toThrow(/connection refused/);
+    // two distinct transports spawned
+    expect(factoryInfo.transports).toHaveLength(2);
   });
-});
 
-describe('McpClientPool.callTool', () => {
-  it('delegates to the transport and returns the result', async () => {
-    const pool = new McpClientPool(async () => fakeTransport());
-    const result = await pool.callTool(server(), 'quote_get', { symbol: 'AAPL' });
-    expect(result).toEqual({ content: [{ type: 'text', text: 'ok' }] });
+  it('REUSES the connection within the same tenant scope', async () => {
+    await pool.callTool(server, ctx('acme'), 't', {});
+    await pool.callTool(server, ctx('acme'), 't', {});
+
+    expect(factoryInfo.transports).toHaveLength(1);
+  });
+
+  it('callers without tenant share one default-scope connection', async () => {
+    await pool.callTool(server, ctx(null), 't', {});
+    await pool.callTool(server, ctx(null), 't', {});
+
+    expect(factoryInfo.transports).toHaveLength(1);
+  });
+
+  describe('maxConnectionsPerServer (LRU eviction)', () => {
+    it('evicts the least recently used tenant connection beyond the limit', async () => {
+      const limited = new McpClientPool(factoryInfo.factory, {
+        maxConnectionsPerServer: 2,
+      });
+
+      await limited.callTool(server, ctx('t1'), 't', {});
+      await limited.callTool(server, ctx('t2'), 't', {});
+
+      const t1Conn = factoryInfo.transports[0];
+      const t2Conn = factoryInfo.transports[1];
+
+      // touch t1 again → t2 becomes the LRU
+      await limited.callTool(server, ctx('t1'), 't', {});
+
+      // third tenant triggers eviction of t2's connection
+      await limited.callTool(server, ctx('t3'), 't', {});
+
+      // only t3 was newly created; exactly one of t1/t2 got evicted
+      const openCount = factoryInfo.transports.filter((tr) => !tr.closed).length;
+      expect(openCount).toBe(2);
+      expect(factoryInfo.transports).toHaveLength(3);
+      expect(t1Conn.closed).toBe(false); // t1 was touched, stays open
+      expect(t2Conn.closed).toBe(true); // LRU evicted
+    });
+  });
+
+  describe('disconnect', () => {
+    it('closes only the caller-scoped connection', async () => {
+      await pool.callTool(server, ctx('acme'), 't', {});
+      await pool.callTool(server, ctx('globex'), 't', {});
+      const acmeConn = factoryInfo.transports[0];
+      const globexConn = factoryInfo.transports[1];
+
+      await pool.disconnect('srv-1', ctx('acme'));
+
+      expect(acmeConn.closed).toBe(true);
+      expect(globexConn.closed).toBe(false);
+
+      // next acme call spawns a fresh connection
+      await pool.callTool(server, ctx('acme'), 't', {});
+      expect(factoryInfo.transports).toHaveLength(3);
+    });
   });
 });

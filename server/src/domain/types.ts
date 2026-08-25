@@ -81,6 +81,13 @@ export interface MCPServer {
   name: string;
   description: string;
   scope: Scope;
+  /**
+   * Shared server: visible to ALL tenants (like global), but every tenant
+   * connects with its own credential binding. Only superadmins may set
+   * this. stdio servers cannot be shared (process isolation impossible);
+   * shared servers use the default credential scope.
+   */
+  shared: boolean;
   ownerId: string | null;
   transport: Transport;
   connection: ConnectionConfig;

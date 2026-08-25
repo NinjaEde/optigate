@@ -6,6 +6,11 @@ export function canView(server: MCPServer, auth: AuthContext): boolean {
     return true;
   }
 
+  // shared servers are visible platform-wide (credentials stay per-tenant)
+  if (server.shared) {
+    return true;
+  }
+
   switch (server.scope) {
     case 'global':
       return true;

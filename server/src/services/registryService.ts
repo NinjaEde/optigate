@@ -10,6 +10,8 @@ export interface RegisterServerInput {
   name: string;
   description: string;
   scope: Scope;
+  /** Only superadmins; stdio servers cannot be shared (see assertShared). */
+  shared?: boolean;
   transport: Transport;
   connection: MCPServer['connection'];
 }
@@ -58,6 +60,8 @@ export class RegistryService {
 
     this.assertConnectionValid(input.transport, input.connection);
 
+    const shared = this.assertShared(auth, input.shared ?? false, input.transport);
+
     const existing = await this.repo.findByNameInTenant(input.name, input.scope === 'global' ? null : auth.tenantId);
     if (existing && !existing.deletedAt) {
       throw new Error(`A server named "${input.name}" already exists`);
@@ -70,6 +74,7 @@ export class RegistryService {
       name: input.name,
       description: input.description,
       scope: input.scope,
+      shared,
       ownerId: input.scope === 'private' ? auth.userId : null,
       transport: input.transport,
       connection: input.connection,
@@ -321,5 +326,34 @@ export class RegistryService {
     if (transport === 'stdio' && !connection.command) {
       throw new Error('stdio transports require a connection.command');
     }
+  }
+
+  /**
+   * Shared servers are visible platform-wide but connect per tenant.
+   * Decision (2026-08): shared is superadmin-only and stdio servers cannot
+   * be shared — process isolation across tenants is impossible for spawned
+   * processes; shared stdio would force every tenant onto one process with
+   * default credentials. HTTP/SSE servers may be shared; tenants without
+   * their own credential binding use the default (platform-financed)
+   * credentials — per-tenant bindings are opt-in via the bindings API.
+   */
+  private assertShared(
+    auth: AuthContext,
+    shared: boolean,
+    transport: Transport,
+  ): boolean {
+    if (!shared) {
+      return false;
+    }
+    if (auth.role !== 'superadmin') {
+      throw new Error('Only superadmins may share servers platform-wide');
+    }
+    if (transport === 'stdio') {
+      throw new Error(
+        'stdio servers cannot be shared: process-based servers cannot '
+          + 'isolate tenants. Register them per tenant instead.',
+      );
+    }
+    return true;
   }
 }

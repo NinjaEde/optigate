@@ -8,6 +8,7 @@ import {
 import { McpClientPool } from './infra/mcp/clientPool.js';
 import { createSdkTransport } from './infra/mcp/sdkTransport.js';
 import { verifyKeycloakToken } from './infra/auth/keycloak.js';
+import { CredentialResolver } from './infra/mcp/credentialResolver.js';
 
 const PORT = Number(process.env.PORT ?? 8100);
 const APPROVAL_REQUIRED = process.env.APPROVAL_REQUIRED === 'true';
@@ -79,7 +80,10 @@ async function main() {
   const app = await buildApp({
     auth: { resolveAuth },
     registry: { repo, audit },
-    pool: new McpClientPool(createSdkTransport),
+    pool: new McpClientPool(createSdkTransport, {
+      maxConnectionsPerServer: Number(process.env.MAX_CONNS_PER_SERVER ?? 20),
+    }),
+    credentials: new CredentialResolver(),
     approvalRequired: APPROVAL_REQUIRED,
   });
 
