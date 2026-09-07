@@ -42,6 +42,9 @@ MCP Client ──▶ POST /mcp ──▶ OptiGate ──▶ managed MCP servers 
 | **Rate limiting** | 200 req/min global via `@fastify/rate‑limit` |
 | **Admin UI** | Server cards with status badges, custom key/value headers, live tool search view, audit feed — DE/EN/FR |
 
+## Admin UI
+![alt text](assets/image.png)
+
 ## Quick Start (Docker Compose)
 
 The fastest way to run OptiGate is the bundled Compose stack — no local Node
