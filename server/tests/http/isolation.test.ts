@@ -7,9 +7,6 @@ import { McpClientPool } from '../../src/infra/mcp/clientPool';
 import { CredentialResolver } from '../../src/infra/mcp/credentialResolver';
 import type { AuthContext } from '../../src/domain/types';
 
-const SUPER = { userId: 'u0', role: 'superadmin', tenantId: null };
-const ADMIN_T1 = { userId: 'u1', role: 'admin', tenantId: 't1' };
-
 async function makeApp() {
   const audit = new InMemoryAuditLog();
   const app = await buildApp({

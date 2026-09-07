@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { ToolIndexReconciler } from '../../src/infra/mcp/toolIndexReconciler.js';
 import type { MCPServer, ToolMeta } from '../../src/domain/types.js';
 
