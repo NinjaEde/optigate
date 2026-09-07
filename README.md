@@ -228,4 +228,9 @@ React 18 · Vite · Tailwind CSS v4
 
 ## License
 
-MIT
+MIT — free to use, modify, and distribute.
+
+If this project saves you time or helps your agents work better, you can
+support it here:
+
+[☕ Buy me a coffee](https://buymeacoffee.com/ninjaede)
