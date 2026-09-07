@@ -7,8 +7,9 @@ import { McpClientPool } from '../../src/infra/mcp/clientPool';
 import { CredentialResolver } from '../../src/infra/mcp/credentialResolver';
 import type { AuthContext } from '../../src/domain/types';
 
-const ADMIN = { userId: 'u1', role: 'admin', tenantId: 't1' };
 const SUPER = { userId: 'u0', role: 'superadmin', tenantId: null };
+const ADMIN = { userId: 'u1', role: 'admin', tenantId: 't1' };
+const USER = { userId: 'u2', role: 'user', tenantId: 't1' };
 
 async function makeApp() {
   const audit = new InMemoryAuditLog();
@@ -20,7 +21,9 @@ async function makeApp() {
         if (!name) {
           throw new Error('Unauthorized');
         }
-        return name === 'super' ? SUPER : (ADMIN as AuthContext);
+        if (name === 'super') return SUPER;
+        if (name === 'user') return USER;
+        return ADMIN as AuthContext;
       },
     },
     registry: {
@@ -196,5 +199,112 @@ describe('REST API', () => {
     });
     expect(search.statusCode).toBe(200);
     expect(Array.isArray(search.json().tools)).toBe(true);
+  });
+
+  describe('credential bindings API', () => {
+    let serverId: string;
+
+    beforeEach(async () => {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/servers',
+        headers: { 'x-test-user': 'super' },
+        payload: {
+          name: 'shared-srv',
+          scope: 'global',
+          transport: 'streamable_http',
+          connection: { url: 'https://shared.example.com/mcp' },
+        },
+      });
+      serverId = res.json().id;
+    });
+
+    it('lists bindings (empty initially)', async () => {
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/servers/${serverId}/bindings`,
+        headers: { 'x-test-user': 'super' },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().bindings).toEqual([]);
+    });
+
+    it('creates a tenant binding', async () => {
+      const res = await app.inject({
+        method: 'PUT',
+        url: `/api/servers/${serverId}/bindings/acme-corp`,
+        headers: { 'x-test-user': 'super' },
+        payload: {
+          auth: { type: 'bearer', secretRef: 'ACME_KEY' },
+        },
+      });
+      expect(res.statusCode).toBe(201);
+
+      const list = await app.inject({
+        method: 'GET',
+        url: `/api/servers/${serverId}/bindings`,
+        headers: { 'x-test-user': 'super' },
+      });
+      expect(list.json().bindings).toHaveLength(1);
+      expect(list.json().bindings[0].tenantId).toBe('acme-corp');
+      expect(list.json().bindings[0].authType).toBe('bearer');
+    });
+
+    it('creates a default binding (tenantId=null)', async () => {
+      const res = await app.inject({
+        method: 'PUT',
+        url: `/api/servers/${serverId}/bindings/default`,
+        headers: { 'x-test-user': 'super' },
+        payload: {
+          auth: { type: 'api_key', secretRef: 'DEFAULT_KEY' },
+        },
+      });
+      expect(res.statusCode).toBe(201);
+      expect(res.json().tenantId).toBeNull();
+    });
+
+    it('rejects admin setting bindings for a different tenant', async () => {
+      const res = await app.inject({
+        method: 'PUT',
+        url: `/api/servers/${serverId}/bindings/other-corp`,
+        headers: { 'x-test-user': 'admin' },
+        payload: {
+          auth: { type: 'bearer', secretRef: 'OTHER_KEY' },
+        },
+      });
+      expect(res.statusCode).toBe(403);
+    });
+
+    it('deletes a binding', async () => {
+      await app.inject({
+        method: 'PUT',
+        url: `/api/servers/${serverId}/bindings/acme-corp`,
+        headers: { 'x-test-user': 'super' },
+        payload: { auth: { type: 'bearer', secretRef: 'K' } },
+      });
+
+      const del = await app.inject({
+        method: 'DELETE',
+        url: `/api/servers/${serverId}/bindings/acme-corp`,
+        headers: { 'x-test-user': 'super' },
+      });
+      expect(del.statusCode).toBe(204);
+
+      const list = await app.inject({
+        method: 'GET',
+        url: `/api/servers/${serverId}/bindings`,
+        headers: { 'x-test-user': 'super' },
+      });
+      expect(list.json().bindings).toHaveLength(0);
+    });
+
+    it('rejects non-admin from viewing bindings', async () => {
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/servers/${serverId}/bindings`,
+        headers: { 'x-test-user': 'user' },
+      });
+      expect(res.statusCode).toBe(403);
+    });
   });
 });

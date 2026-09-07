@@ -26,8 +26,10 @@ services:
       AUTH_MODE: dev
       APPROVAL_REQUIRED: 'false'
       DATABASE_URL: postgres://optigate:optigate@db:5432/mcp_registry
-      CHOKIDAR_USEPOLLING: 'true' # reliable file watching across the macOS Docker mount
+      CHOKIDAR_USEPOLLING: 'true'
       SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:-dev-only-secret-key}
+      SSRF_ALLOWED_HOSTS: ${SSRF_ALLOWED_HOSTS}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3030,http://localhost:5173}
     volumes:
       - ./server:/app/server
       - ./tsconfig.base.json:/app/tsconfig.base.json

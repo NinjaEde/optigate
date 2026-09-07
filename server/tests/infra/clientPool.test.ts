@@ -1,6 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-import { McpClientPool } from '../../src/infra/mcp/clientPool.js';
+import {
+  McpClientPool,
+  validateArgs,
+} from '../../src/infra/mcp/clientPool.js';
 import type {
   AuthContext,
   MCPServer,
@@ -136,5 +139,62 @@ describe('McpClientPool — tenant-scoped connections', () => {
       await pool.callTool(server, ctx('acme'), 't', {});
       expect(factoryInfo.transports).toHaveLength(3);
     });
+  });
+});
+
+describe('validateArgs', () => {
+  it('accepts valid args matching the schema', () => {
+    expect(() =>
+      validateArgs('my-tool', { name: 'foo', count: 3 }, {
+        type: 'object',
+        required: ['name'],
+        properties: { name: { type: 'string' }, count: { type: 'integer' } },
+      }),
+    ).not.toThrow();
+  });
+
+  it('rejects missing required fields', () => {
+    expect(() =>
+      validateArgs('my-tool', { count: 3 }, {
+        type: 'object',
+        required: ['name'],
+        properties: { name: { type: 'string' }, count: { type: 'integer' } },
+      }),
+    ).toThrow(/missing required argument "name"/);
+  });
+
+  it('rejects wrong types', () => {
+    expect(() =>
+      validateArgs('my-tool', { name: 42 }, {
+        type: 'object',
+        properties: { name: { type: 'string' } },
+      }),
+    ).toThrow(/argument "name" must be a string/);
+  });
+
+  it('accepts args without schema (loose mode)', () => {
+    expect(() => validateArgs('my-tool', { anything: 1 }, undefined)).not.toThrow();
+  });
+
+  it('accepts args with empty schema', () => {
+    expect(() => validateArgs('my-tool', {}, { type: 'object' })).not.toThrow();
+  });
+
+  it('rejects wrong type for boolean', () => {
+    expect(() =>
+      validateArgs('my-tool', { flag: 'yes' }, {
+        type: 'object',
+        properties: { flag: { type: 'boolean' } },
+      }),
+    ).toThrow(/argument "flag" must be a boolean/);
+  });
+
+  it('rejects wrong type for array', () => {
+    expect(() =>
+      validateArgs('my-tool', { items: 'not-an-array' }, {
+        type: 'object',
+        properties: { items: { type: 'array' } },
+      }),
+    ).toThrow(/argument "items" must be an array/);
   });
 });

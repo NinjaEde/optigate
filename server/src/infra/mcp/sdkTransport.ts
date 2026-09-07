@@ -1,10 +1,12 @@
+import { readFileSync } from 'node:fs';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
 import type { McpTransport } from './clientPool.js';
 import { buildAuthHeaders } from './authHeaders.js';
-import type { MCPServer } from '../../domain/types.js';
+import type { AuthConfig, MCPServer } from '../../domain/types.js';
 
 /**
  * Resolves envRef names to actual secret values at connect time.
@@ -24,11 +26,21 @@ export function resolveEnvRefs(refs: string[] = []): Record<string, string> {
 }
 
 /** Wraps the official MCP SDK client behind our transport interface. */
-export async function createSdkTransport(server: MCPServer): Promise<McpTransport> {
+const pkg = JSON.parse(
+  readFileSync(new URL('../../../package.json', import.meta.url), 'utf-8'),
+);
+
+export async function createSdkTransport(
+  server: MCPServer,
+  authOverride?: AuthConfig,
+): Promise<McpTransport> {
   const client = new Client({
     name: 'optigate',
-    version: '1.0.0',
+    version: pkg.version as string,
   });
+
+  // per-tenant credential binding overrides the server's default auth
+  const effectiveAuth = authOverride ?? server.connection.auth;
 
   if (server.transport === 'stdio') {
     const env = resolveEnvRefs(server.connection.envRefs);
@@ -39,14 +51,23 @@ export async function createSdkTransport(server: MCPServer): Promise<McpTranspor
     });
     await client.connect(transport);
   } else if (server.connection.url) {
-    // streamable_http and sse both use the HTTP transport; the SDK
-    // negotiates SSE fallback automatically.
+    // SSRF guard: if SSRF_ALLOWED_HOSTS is set, only connect to allowed hosts
+    assertAllowedUrl(server.connection.url);
     const url = new URL(server.connection.url);
-    const headers = resolveHeaders(server);
-    const transport = new StreamableHTTPClientTransport(url, {
-      requestInit: Object.keys(headers).length ? { headers } : undefined,
-    });
-    await client.connect(transport);
+    const headers = resolveHeaders(server.connection.customHeaders, server.connection.customHeadersEnvRefs, server.connection.envRefs, effectiveAuth);
+
+    if (server.transport === 'sse') {
+      const transport = new SSEClientTransport(url, {
+        requestInit: Object.keys(headers).length ? { headers } : undefined,
+      });
+      await client.connect(transport);
+    } else {
+      // streamable_http — SDK negotiates the protocol variant automatically
+      const transport = new StreamableHTTPClientTransport(url, {
+        requestInit: Object.keys(headers).length ? { headers } : undefined,
+      });
+      await client.connect(transport);
+    }
   } else {
     throw new Error(`Cannot connect server "${server.name}": missing connection target`);
   }
@@ -75,20 +96,73 @@ export async function createSdkTransport(server: MCPServer): Promise<McpTranspor
   };
 }
 
-function resolveHeaders(server: MCPServer): Record<string, string> {
+function resolveHeaders(
+  customHeaders: Record<string, string> | undefined,
+  customHeadersEnvRefs: Record<string, string> | undefined,
+  envRefs: string[] | undefined,
+  auth: AuthConfig | undefined,
+): Record<string, string> {
   const headers: Record<string, string> = {
-    // static key/value headers — independent of the auth profile
-    ...server.connection.customHeaders,
-    ...buildAuthHeaders(
-      server.connection.auth,
-      server.connection.customHeadersEnvRefs,
-    ),
+    ...customHeaders,
+    ...buildAuthHeaders(auth, customHeadersEnvRefs),
   };
-  for (const ref of server.connection.envRefs ?? []) {
+  for (const ref of envRefs ?? []) {
     const value = process.env[ref];
     if (value !== undefined) {
       headers[`x-mcp-${ref.toLowerCase().replace(/_/g, '-')}`] = value;
     }
   }
   return headers;
+}
+
+const SSRF_DENY_HOSTS = new Set([
+  '169.254.169.254', // cloud metadata endpoints
+  '127.0.0.1',
+  '0.0.0.0',
+]);
+
+/**
+ * Validates that the URL target is allowed per the SSRF policy.
+ * Uses SSRF_ALLOWED_HOSTS env (comma-separated globs) if set;
+ * otherwise falls back to a deny-list of sensitive internal IPs.
+ */
+export function assertAllowedUrl(urlString: string): void {
+  const url = new URL(urlString);
+  const host = url.hostname;
+
+  // explicit allowlist — everything else is rejected
+  const allowed = process.env.SSRF_ALLOWED_HOSTS;
+  if (allowed) {
+    const patterns = allowed.split(',').map((p) => p.trim().toLowerCase());
+    const match = patterns.some((pattern) => {
+      if (pattern.startsWith('*.')) {
+        return host.endsWith(pattern.slice(1));
+      }
+      return host === pattern;
+    });
+    if (!match) {
+      throw new Error(
+        `SSRF blocked: host "${host}" is not in SSRF_ALLOWED_HOSTS`,
+      );
+    }
+    return;
+  }
+
+  // no allowlist → deny known dangerous targets (backwards compat)
+  if (SSRF_DENY_HOSTS.has(host)) {
+    throw new Error(
+      `SSRF blocked: connection to "${host}" is not allowed`,
+    );
+  }
+
+  // also block link-local and loopback ranges
+  if (
+    host === 'localhost' ||
+    host.startsWith('127.') ||
+    host.startsWith('169.254.')
+  ) {
+    throw new Error(
+      `SSRF blocked: connection to loopback/link-local address "${host}" is not allowed`,
+    );
+  }
 }

@@ -1,4 +1,5 @@
-import type { AuthContext, MCPServer, ToolMeta } from '../../domain/types.js';
+import type { AuthConfig, AuthContext, MCPServer, ToolMeta } from '../../domain/types.js';
+import type { ICredentialResolver } from './credentialResolver.js';
 
 /**
  * Minimal transport abstraction so the pool can be tested without real
@@ -16,7 +17,71 @@ export interface McpTransport {
   ): Promise<unknown>;
 }
 
-export type TransportFactory = (server: MCPServer) => Promise<McpTransport>;
+export type TransportFactory = (
+  server: MCPServer,
+  authOverride?: AuthConfig,
+) => Promise<McpTransport>;
+
+/** Lightweight args validation against a tool's inputSchema. */
+export function validateArgs(
+  toolName: string,
+  args: Record<string, unknown>,
+  inputSchema: Record<string, unknown> | undefined,
+): void {
+  if (!inputSchema || typeof inputSchema !== 'object') {
+    return;
+  }
+  const schema = inputSchema as Record<string, unknown>;
+
+  // validate required properties exist
+  const required = schema.required;
+  if (Array.isArray(required)) {
+    for (const field of required) {
+      const fieldName = String(field);
+      if (!(fieldName in args)) {
+        throw new Error(
+          `Tool "${toolName}": missing required argument "${fieldName}"`,
+        );
+      }
+    }
+  }
+
+  // validate type constraints for simple types
+  const properties = schema.properties as Record<string, unknown> | undefined;
+  if (properties && typeof properties === 'object') {
+    for (const [key, value] of Object.entries(args)) {
+      const propSchema = properties[key] as Record<string, unknown> | undefined;
+      if (!propSchema || typeof propSchema !== 'object') {
+        continue;
+      }
+      if (propSchema.type === 'string' && typeof value !== 'string') {
+        throw new Error(
+          `Tool "${toolName}": argument "${key}" must be a string`,
+        );
+      }
+      if (propSchema.type === 'number' && typeof value !== 'number') {
+        throw new Error(
+          `Tool "${toolName}": argument "${key}" must be a number`,
+        );
+      }
+      if (propSchema.type === 'integer' && !Number.isInteger(value)) {
+        throw new Error(
+          `Tool "${toolName}": argument "${key}" must be an integer`,
+        );
+      }
+      if (propSchema.type === 'boolean' && typeof value !== 'boolean') {
+        throw new Error(
+          `Tool "${toolName}": argument "${key}" must be a boolean`,
+        );
+      }
+      if (propSchema.type === 'array' && !Array.isArray(value)) {
+        throw new Error(
+          `Tool "${toolName}": argument "${key}" must be an array`,
+        );
+      }
+    }
+  }
+}
 
 /** Isolation key: one physical connection per server + credential scope. */
 function connKey(serverId: string, ctx: Pick<AuthContext, 'tenantId'>): string {
@@ -30,6 +95,12 @@ export interface McpClientPoolOptions {
    * on next use). Default: 20.
    */
   maxConnectionsPerServer?: number;
+  /**
+   * Credential resolver for per-tenant credential bindings.
+   * When provided, the pool resolves per-tenant auth overrides
+   * before creating new connections.
+   */
+  credentialResolver?: ICredentialResolver;
 }
 
 interface PooledConnection {
@@ -41,12 +112,14 @@ export class McpClientPool {
   private readonly connections = new Map<string, PooledConnection>();
   private readonly toolCache = new Map<string, ToolMeta[]>();
   private readonly maxConnectionsPerServer: number;
+  private readonly credentialResolver?: ICredentialResolver;
 
   constructor(
     private readonly factory: TransportFactory,
     options: McpClientPoolOptions = {},
   ) {
     this.maxConnectionsPerServer = options.maxConnectionsPerServer ?? 20;
+    this.credentialResolver = options.credentialResolver;
   }
 
   async syncTools(server: MCPServer, ctx: AuthContext): Promise<ToolMeta[]> {
@@ -85,6 +158,15 @@ export class McpClientPool {
     toolName: string,
     args: Record<string, unknown>,
   ): Promise<unknown> {
+    // validate args against the cached tool schema before forwarding
+    const cached = this.toolCache.get(server.id);
+    if (cached) {
+      const toolMeta = cached.find((t) => t.name === toolName);
+      if (toolMeta) {
+        validateArgs(toolName, args, toolMeta.inputSchema);
+      }
+    }
+
     const { transport } = await this.getPooled(server, ctx);
     return transport.callTool(toolName, args);
   }
@@ -137,7 +219,13 @@ export class McpClientPool {
     // enforce per-server limit before spawning a new connection
     this.evictIfNeeded(server.id);
 
-    const transport = await this.factory(server);
+    // resolve per-tenant auth override before connecting
+    let authOverride: AuthConfig | undefined;
+    if (this.credentialResolver) {
+      authOverride = await this.credentialResolver.resolve(server.id, ctx);
+    }
+
+    const transport = await this.factory(server, authOverride);
     await transport.connect();
 
     const pooled: PooledConnection = { transport, lastUsedAt: this.now() };

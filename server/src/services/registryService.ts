@@ -41,6 +41,7 @@ export interface AuditSink {
     subjectId: string | null;
     detail: Record<string, unknown>;
   }): Promise<void>;
+  recent?(limit?: number, tenantId?: string | null): Promise<unknown[]>;
 }
 
 export class RegistryService {

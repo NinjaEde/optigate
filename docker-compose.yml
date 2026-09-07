@@ -22,10 +22,13 @@ services:
       NODE_ENV: production
       PORT: 8100
       AUTH_MODE: keycloak
-      KEYCLOAK_URL: ${KEYCLOAK_URL:-https://auth.kio-space.de}
-      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-kio-space}
+      KEYCLOAK_URL: ${KEYCLOAK_URL}
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM}
       APPROVAL_REQUIRED: ${APPROVAL_REQUIRED:-true}
       DATABASE_URL: postgres://optigate:${POSTGRES_PASSWORD:-optigate}@db:5432/mcp_registry
+      SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY}
+      SSRF_ALLOWED_HOSTS: ${SSRF_ALLOWED_HOSTS}
+      CORS_ORIGIN: ${CORS_ORIGIN}
     ports:
       - '8100:8100'
     depends_on:

@@ -1,4 +1,4 @@
-import type { MCPServer, ToolMeta } from '../../domain/types.js';
+import type { MCPServer, ServerStatus, ToolMeta } from '../../domain/types.js';
 
 export interface ReconcilerDeps {
   /**
@@ -11,6 +11,12 @@ export interface ReconcilerDeps {
   syncTools(server: MCPServer): Promise<ToolMeta[]>;
   /** Called whenever the index content changed. */
   onIndexUpdated?(index: Map<string, ToolMeta[]>): void;
+  /**
+   * Reports a server status change back to the registry.
+   * Used to set 'degraded' after repeated failures or back to 'healthy'
+   * on success.
+   */
+  markStatus?(serverId: string, status: ServerStatus, detail: string): Promise<void>;
 }
 
 export interface ToolIndexReconcilerOptions {
@@ -18,12 +24,18 @@ export interface ToolIndexReconcilerOptions {
   retryDelayMs?: number;
   /** Background refresh interval (ms). Default 60s. */
   intervalMs?: number;
+  /**
+   * Jitter max fraction of interval to add randomly (0–1).
+   * Default 0.2 (so the actual interval varies ±20% around intervalMs).
+   */
+  jitter?: number;
   /** Logger for diagnostics. */
   log?: (msg: string) => void;
 }
 
 const DEFAULT_RETRY_DELAY_MS = 5_000;
 const DEFAULT_INTERVAL_MS = 60_000;
+const DEFAULT_JITTER = 0.2;
 
 /**
  * Keeps the global tool index continuously up to date:
@@ -44,7 +56,10 @@ export class ToolIndexReconciler {
   private running = false;
   private readonly retryDelayMs: number;
   private readonly intervalMs: number;
+  private readonly jitter: number;
   private readonly log: (msg: string) => void;
+  /** Track consecutive failures per server to set degraded status. */
+  private readonly consecutiveFailures = new Map<string, number>();
 
   constructor(
     private readonly deps: ReconcilerDeps,
@@ -52,6 +67,7 @@ export class ToolIndexReconciler {
   ) {
     this.retryDelayMs = options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
     this.intervalMs = options.intervalMs ?? DEFAULT_INTERVAL_MS;
+    this.jitter = options.jitter ?? DEFAULT_JITTER;
     this.log = options.log ?? (() => undefined);
   }
 
@@ -78,14 +94,16 @@ export class ToolIndexReconciler {
         const previous = this.index.get(server.id);
 
         // deleted / disabled / pending → drop from index entirely
-        if (server.status !== 'healthy') {
+        if (server.status !== 'healthy' && server.status !== 'degraded') {
           continue;
         }
 
         let tools: ToolMeta[] | null = null;
+        let succeeded = false;
         for (let attempt = 1; attempt <= 3; attempt++) {
           try {
             tools = await this.deps.syncTools(server);
+            succeeded = true;
             break;
           } catch (err) {
             this.log(
@@ -95,6 +113,23 @@ export class ToolIndexReconciler {
             if (attempt < 3) {
               await delay(this.retryDelayMs);
             }
+          }
+        }
+
+        if (succeeded) {
+          // had consecutive failures before → restore to healthy
+          const hadFailures = this.consecutiveFailures.delete(server.id);
+          if (hadFailures && this.deps.markStatus) {
+            void this.deps.markStatus(server.id, 'healthy', 'reconnected');
+          }
+        } else {
+          // increment consecutive failure counter
+          const failures = (this.consecutiveFailures.get(server.id) ?? 0) + 1;
+          this.consecutiveFailures.set(server.id, failures);
+
+          // after 2 consecutive failures → set degraded
+          if (failures >= 2 && this.deps.markStatus) {
+            void this.deps.markStatus(server.id, 'degraded', `${failures} consecutive sync failures`);
           }
         }
 
@@ -129,17 +164,25 @@ export class ToolIndexReconciler {
       this.log(`initial reconcile failed: ${(err as Error).message}`),
     );
 
-    this.timer = setInterval(() => {
-      void this.reconcileNow().catch((err) =>
-        this.log(`reconcile failed: ${(err as Error).message}`),
-      );
-    }, this.intervalMs);
-    this.timer.unref();
+    const scheduleNext = () => {
+      const jitterMs = Math.random() * this.intervalMs * this.jitter;
+      const delayMs = this.intervalMs - (this.intervalMs * this.jitter) / 2 + jitterMs;
+      this.timer = setTimeout(() => {
+        void this.reconcileNow().catch((err) =>
+          this.log(`reconcile failed: ${(err as Error).message}`),
+        ).finally(() => {
+          scheduleNext();
+        });
+      }, delayMs);
+      this.timer.unref();
+    };
+
+    scheduleNext();
   }
 
   stop(): void {
     if (this.timer) {
-      clearInterval(this.timer);
+      clearTimeout(this.timer);
       this.timer = null;
     }
   }

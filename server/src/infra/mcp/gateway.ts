@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
@@ -46,7 +47,10 @@ function jsonRpcError(id: unknown, code: number, message: string) {
   return { jsonrpc: '2.0', id, error: { code, message } };
 }
 
-const SERVER_INFO = { name: 'optigate', version: '1.0.0' } as const;
+const pkg = JSON.parse(
+  readFileSync(new URL('../../../package.json', import.meta.url), 'utf-8'),
+);
+const SERVER_INFO = { name: 'optigate', version: pkg.version as string };
 
 /**
  * MCP facade ("aggregator") for the registry: exposes all visible registry

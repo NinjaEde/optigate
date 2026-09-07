@@ -11,4 +11,14 @@ export class InMemoryAuditLog implements AuditSink {
       ...event,
     });
   }
+
+  async recent(limit = 100, tenantId?: string | null): Promise<AuditEvent[]> {
+    let filtered = this.events;
+    if (tenantId !== undefined) {
+      filtered = filtered.filter(
+        (e) => e.tenantId === tenantId || e.tenantId === null,
+      );
+    }
+    return filtered.slice(0, limit);
+  }
 }

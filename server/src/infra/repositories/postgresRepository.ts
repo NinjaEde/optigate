@@ -197,7 +197,7 @@ export class PostgresAuditLog implements AuditSink {
 
   async record(event: Omit<AuditEvent, 'id' | 'at'>): Promise<void> {
     await this.pool.query(
-      `INSERT INTO audit_events (id, at, actor_id, tenant_id, action, subject_id, detail)
+      `INSERT INTO audit_events (id, "at", actor_id, tenant_id, action, subject_id, detail)
        VALUES ($1, now(), $2, $3, $4, $5, $6)`,
       [
         crypto.randomUUID(),
@@ -210,7 +210,13 @@ export class PostgresAuditLog implements AuditSink {
     );
   }
 
-  async recent(limit = 100): Promise<AuditEvent[]> {
+  async recent(limit = 100, tenantId?: string | null): Promise<AuditEvent[]> {
+    const params: (string | number | null)[] = [limit];
+    let whereClause = '';
+    if (tenantId !== undefined) {
+      params.push(tenantId);
+      whereClause = ` WHERE (tenant_id IS NULL OR tenant_id = $2) `;
+    }
     const res = await this.pool.query<{
       id: string;
       at: Date;
@@ -220,8 +226,8 @@ export class PostgresAuditLog implements AuditSink {
       subject_id: string | null;
       detail: Record<string, unknown>;
     }>(
-      `SELECT * FROM audit_events ORDER BY at DESC LIMIT $1`,
-      [limit],
+      `SELECT * FROM audit_events${whereClause} ORDER BY "at" DESC LIMIT $1`,
+      params,
     );
 
     return res.rows.map((row): AuditEvent => ({
@@ -237,3 +243,81 @@ export class PostgresAuditLog implements AuditSink {
 }
 
 export type { PoolClient };
+
+import type { AuthConfig } from '../../domain/types.js';
+import type { ICredentialResolver, CredentialBinding } from '../mcp/credentialResolver.js';
+
+interface BindingRow {
+  server_id: string;
+  tenant_id: string | null;
+  auth_enc: Record<string, unknown>;
+  created_by: string;
+}
+
+/**
+ * Postgres-backed credential binding resolver.
+ * Reads/writes the server_credential_bindings table.
+ */
+export class PostgresCredentialResolver implements ICredentialResolver {
+  constructor(private readonly pool: Pool) {}
+
+  async setBinding(
+    serverId: string,
+    tenantId: string | null,
+    auth: AuthConfig,
+  ): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO server_credential_bindings (id, server_id, tenant_id, auth_enc, created_by)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (server_id, coalesce(tenant_id, ''))
+       DO UPDATE SET auth_enc = $4`,
+      [crypto.randomUUID(), serverId, tenantId, JSON.stringify(auth), 'system'],
+    );
+  }
+
+  async deleteBinding(serverId: string, tenantId: string | null): Promise<boolean> {
+    const res = await this.pool.query(
+      `DELETE FROM server_credential_bindings
+       WHERE server_id = $1 AND coalesce(tenant_id, '') = coalesce($2, '')`,
+      [serverId, tenantId],
+    );
+    return (res.rowCount ?? 0) > 0;
+  }
+
+  async listBindings(serverId: string): Promise<CredentialBinding[]> {
+    const res = await this.pool.query<BindingRow>(
+      `SELECT * FROM server_credential_bindings
+       WHERE server_id = $1`,
+      [serverId],
+    );
+    return res.rows.map((row) => ({
+      serverId: row.server_id,
+      tenantId: row.tenant_id,
+      auth: row.auth_enc as unknown as AuthConfig,
+    }));
+  }
+
+  async resolve(
+    serverId: string,
+    ctx: { tenantId: string | null },
+  ): Promise<AuthConfig | undefined> {
+    if (ctx.tenantId) {
+      const res = await this.pool.query<BindingRow>(
+        `SELECT * FROM server_credential_bindings
+         WHERE server_id = $1 AND tenant_id = $2`,
+        [serverId, ctx.tenantId],
+      );
+      if (res.rows[0]) {
+        return res.rows[0].auth_enc as unknown as AuthConfig;
+      }
+    }
+
+    // fallback to default binding
+    const defaultRes = await this.pool.query<BindingRow>(
+      `SELECT * FROM server_credential_bindings
+       WHERE server_id = $1 AND tenant_id IS NULL`,
+      [serverId],
+    );
+    return defaultRes.rows[0]?.auth_enc as unknown as AuthConfig | undefined;
+  }
+}

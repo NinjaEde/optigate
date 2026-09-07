@@ -1,5 +1,6 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
+import rateLimit from '@fastify/rate-limit';
 
 import { RegistryService } from './services/registryService.js';
 import type {
@@ -11,7 +12,7 @@ import { encryptSecret } from './infra/secrets/secretVault.js';
 import { sanitizeAuthForClient } from './infra/mcp/authHeaders.js';
 import { createMcpGateway } from './infra/mcp/gateway.js';
 import { ToolIndexReconciler } from './infra/mcp/toolIndexReconciler.js';
-import { CredentialResolver } from './infra/mcp/credentialResolver.js';
+import type { ICredentialResolver } from './infra/mcp/credentialResolver.js';
 import type {
   AuthContext,
   MCPServer,
@@ -24,12 +25,16 @@ export interface AppOptions {
   };
   registry: {
     repo: ServerRepository;
-    audit: AuditSink & { recent?: (limit?: number) => Promise<unknown[]> };
+    audit: AuditSink;
   };
   pool: McpClientPool;
   /** Per-tenant credential bindings (isolation border, see multi-tenancy doc). */
-  credentials: CredentialResolver;
+  credentials: ICredentialResolver;
   approvalRequired: boolean;
+  /** Optional health check that runs on every /health call (e.g. DB ping). */
+  healthCheck?: () => Promise<void>;
+  /** Comma-separated allowed CORS origins (default: *). */
+  corsOrigin?: string;
 }
 
 const registerSchema = {
@@ -139,6 +144,13 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
           toolsByServer.set(id, tools);
         }
       },
+      markStatus: (serverId, status, detail) =>
+        registry.markStatus(
+          { userId: 'system', role: 'superadmin', tenantId: null },
+          serverId,
+          status,
+          detail,
+        ),
     },
     {
       retryDelayMs: 5_000,
@@ -151,7 +163,27 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     void toolIndexReconciler.reconcileNow().catch(() => undefined);
   }
 
-  await app.register(cors, { origin: true });
+  await app.register(cors, {
+    origin: options.corsOrigin
+      ? options.corsOrigin.split(',').map((s) => s.trim())
+      : true,
+  });
+
+  await app.register(rateLimit, {
+    global: true,
+    max: 200,
+    timeWindow: '1 minute',
+    keyGenerator: (request) => {
+      return request.ip;
+    },
+    errorResponseBuilder: (_request, context) => {
+      return {
+        statusCode: 429,
+        error: 'Too Many Requests',
+        message: `Rate limit exceeded. Max ${context.max} requests per ${context.after}`,
+      };
+    },
+  });
 
   app.addHook('onRequest', async (request, reply) => {
     if (request.url.startsWith('/health') || request.method === 'OPTIONS') {
@@ -233,7 +265,14 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     };
   }
 
-  app.get('/health', async () => ({ status: 'healthy' }));
+  // ── Health endpoint ──────────────────────────────────────────────────
+
+  app.get('/health', async () => {
+    if (typeof options.healthCheck === 'function') {
+      await options.healthCheck();
+    }
+    return { status: 'healthy' };
+  });
 
   // ── Admin: server lifecycle ────────────────────────────────────────────
 
@@ -386,6 +425,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     const { id } = request.params as { id: string };
     try {
       await registry.deleteServer(getAuth(request), id);
+      await options.pool.disconnectAll(id);
+      toolsByServer.delete(id);
       reply.code(204).send();
     } catch {
       reply.code(404).send({ error: 'Server not found' });
@@ -448,8 +489,14 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     }
   });
 
-  app.get('/api/servers/:id/tools', async (request) => {
+  app.get('/api/servers/:id/tools', async (request, reply) => {
     const { id } = request.params as { id: string };
+    try {
+      await registry.getVisibleServer(getAuth(request), id);
+    } catch {
+      reply.code(404).send({ error: 'Server not found' });
+      return;
+    }
     return toolsByServer.get(id) ?? [];
   });
 
@@ -508,6 +555,15 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
         tool_name,
         args ?? {},
       );
+
+      await options.registry.audit?.record({
+        actorId: getAuth(request).userId,
+        tenantId: getAuth(request).tenantId,
+        action: 'tool.called',
+        subjectId: tool_name,
+        detail: { serverId: server_id },
+      });
+
       return { result };
     } catch (err) {
       reply.code(502).send({ error: (err as Error).message });
@@ -544,7 +600,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
         return;
       }
 
-      const bindings = options.credentials.listBindings(id).map((b) => ({
+      const rawBindings = await options.credentials.listBindings(id);
+      const bindings = rawBindings.map((b) => ({
         serverId: b.serverId,
         tenantId: b.tenantId,
         isDefault: b.tenantId === null,
@@ -634,12 +691,10 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 
   // ── Audit feed ────────────────────────────────────────────────────────
 
-  app.get('/api/audit', async () => {
-    const audit = options.registry.audit as {
-      recent?: (limit?: number) => Promise<unknown[]>;
-    };
-    return typeof audit.recent === 'function'
-      ? audit.recent.call(audit, 100)
+  app.get('/api/audit', async (request) => {
+    const auth = getAuth(request);
+    return typeof options.registry.audit.recent === 'function'
+      ? options.registry.audit.recent(100, auth.role === 'superadmin' ? undefined : auth.tenantId)
       : [];
   });
 
@@ -673,8 +728,17 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       const { searchTools } = await import('./domain/toolSearch.js');
       return searchTools(tools, query, limit);
     },
-    callTool: (server, auth, toolName, args) =>
-      options.pool.callTool(server, auth, toolName, args),
+    callTool: async (server, auth, toolName, args) => {
+      const result = await options.pool.callTool(server, auth, toolName, args);
+      await options.registry.audit?.record({
+        actorId: auth.userId,
+        tenantId: auth.tenantId,
+        action: 'tool.called',
+        subjectId: toolName,
+        detail: { serverId: server.id },
+      });
+      return result;
+    },
   });
 
   app.post('/mcp', async (request, reply) => {

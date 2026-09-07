@@ -4,15 +4,17 @@ import { InMemoryAuditLog } from './infra/repositories/memoryAuditLog.js';
 import {
   PostgresServerRepository,
   PostgresAuditLog,
+  PostgresCredentialResolver,
 } from './infra/repositories/postgresRepository.js';
 import { McpClientPool } from './infra/mcp/clientPool.js';
 import { createSdkTransport } from './infra/mcp/sdkTransport.js';
 import { verifyKeycloakToken } from './infra/auth/keycloak.js';
-import { CredentialResolver } from './infra/mcp/credentialResolver.js';
+import { InMemoryCredentialResolver } from './infra/mcp/credentialResolver.js';
 
 const PORT = Number(process.env.PORT ?? 8100);
 const APPROVAL_REQUIRED = process.env.APPROVAL_REQUIRED === 'true';
 const DATABASE_URL = process.env.DATABASE_URL;
+const CORS_ORIGIN = process.env.CORS_ORIGIN;
 
 /**
  * Production auth: Keycloak JWT via Bearer header.
@@ -51,30 +53,36 @@ async function resolveAuth(request: { headers: Record<string, unknown> }) {
   throw new Error('Unauthorized');
 }
 
-async function createPostgresStores(databaseUrl: string) {
-  const { Pool } = await import('pg');
-  const pool = new Pool({ connectionString: databaseUrl });
-  const serverRepo = new PostgresServerRepository(pool);
-  const auditLog = new PostgresAuditLog(pool);
-  await serverRepo.ensureSchema();
-  return { pool, serverRepo, auditLog };
-}
-
 async function main() {
   let repo;
   let audit;
+  let healthCheck: (() => Promise<void>) | undefined;
+  let credentials;
 
   if (DATABASE_URL) {
     console.log('Using Postgres persistence');
-    const { pool, serverRepo, auditLog } =
-      await createPostgresStores(DATABASE_URL);
+    const { Pool } = await import('pg');
+    const pool = new Pool({ connectionString: DATABASE_URL });
+    const serverRepo = new PostgresServerRepository(pool);
+    const auditLog = new PostgresAuditLog(pool);
+    await serverRepo.ensureSchema();
     repo = serverRepo;
     audit = auditLog;
-    void pool; // pooled connections live for the process lifetime
+    credentials = new PostgresCredentialResolver(pool);
+    healthCheck = async () => {
+      const client = await pool.connect();
+      try {
+        await client.query('SELECT 1');
+      } finally {
+        client.release();
+      }
+    };
+    void pool;
   } else {
     console.log('Using in-memory persistence (set DATABASE_URL for Postgres)');
     repo = new InMemoryServerRepository();
     audit = new InMemoryAuditLog();
+    credentials = new InMemoryCredentialResolver();
   }
 
   const app = await buildApp({
@@ -82,9 +90,12 @@ async function main() {
     registry: { repo, audit },
     pool: new McpClientPool(createSdkTransport, {
       maxConnectionsPerServer: Number(process.env.MAX_CONNS_PER_SERVER ?? 20),
+      credentialResolver: credentials,
     }),
-    credentials: new CredentialResolver(),
+    credentials,
     approvalRequired: APPROVAL_REQUIRED,
+    healthCheck,
+    corsOrigin: CORS_ORIGIN,
   });
 
   await app.listen({ port: PORT, host: '0.0.0.0' });
