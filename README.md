@@ -1,5 +1,12 @@
 # OptiGate
 
+[![MIT License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![Node](https://img.shields.io/badge/Node-24-5FA04E?logo=nodedotnet&logoColor=white)](https://nodejs.org/)
+[![Vitest](https://img.shields.io/badge/tested%20with-Vitest-6B9A37?logo=vitest&logoColor=white)](https://vitest.dev/)
+[![Tests](https://img.shields.io/badge/Tests-92%20passed-2ea44f)](server/tests)
+[![Buy me a coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-ffdd00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/ninjaede)
+
 **Your optimized MCP gateway.** One endpoint for all your MCP servers — with
 token-sparing tool retrieval built in.
 
