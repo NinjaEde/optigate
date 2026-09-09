@@ -19,6 +19,9 @@ ENV NODE_ENV=production
 
 COPY --from=build /app/server/node_modules node_modules
 COPY --from=build /app/server/dist dist
+# Required at runtime: gateway.js/sdkTransport.js read ../../../package.json
+# (server version for MCP initialize response)
+COPY --from=build /app/server/package.json package.json
 
 EXPOSE 8100
 
