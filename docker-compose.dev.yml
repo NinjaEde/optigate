@@ -33,8 +33,6 @@ services:
     volumes:
       - ./server:/app/server
       - ./tsconfig.base.json:/app/tsconfig.base.json
-      # stdio-Server: lokale Projekte im Container verfügbar machen
-      - /Users/edgarkoenig/workspace:/Users/edgarkoenig/workspace
       - server_node_modules:/app/server/node_modules # keep container deps isolated from host
     ports:
       - '8100:8100'
