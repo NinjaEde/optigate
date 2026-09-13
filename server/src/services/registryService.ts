@@ -5,6 +5,7 @@ import type {
   Transport,
 } from '../domain/types.js';
 import type { SearchableTool } from '../domain/toolSearch.js';
+import { ForbiddenError } from './errors.js';
 
 export interface RegisterServerInput {
   name: string;
@@ -129,6 +130,21 @@ export class RegistryService {
     return server;
   }
 
+  /**
+   * Like getVisibleServer, but additionally requires manage rights
+   * (canManage). Used by endpoints with side effects on the server or its
+   * upstream connections (update/delete/disable go through the dedicated
+   * methods; validate/refresh/disconnect call this directly).
+   */
+  async getManageableServer(auth: AuthContext, id: string): Promise<MCPServer> {
+    const { canManage } = await import('../domain/policy.js');
+    const server = await this.getVisibleServer(auth, id);
+    if (!canManage(auth, server)) {
+      throw new ForbiddenError('Only admins of this server may manage it');
+    }
+    return server;
+  }
+
   async approveServer(auth: AuthContext, id: string): Promise<MCPServer> {
     const { canApprove } = await import('../domain/policy.js');
     if (!canApprove(auth)) {
@@ -155,7 +171,7 @@ export class RegistryService {
     const server = await this.getVisibleServer(auth, id);
     const { canManage } = await import('../domain/policy.js');
     if (!canManage(auth, server)) {
-      throw new Error('Only admins of this server may disable it');
+      throw new ForbiddenError('Only admins of this server may disable it');
     }
     server.status = 'disabled';
     server.updatedAt = new Date().toISOString();
@@ -211,7 +227,7 @@ export class RegistryService {
 
     const { canManage } = await import('../domain/policy.js');
     if (!canManage(auth, server)) {
-      throw new Error('Only admins of this server may update it');
+      throw new ForbiddenError('Only admins of this server may update it');
     }
 
     if (patch.name !== undefined && patch.name !== server.name) {
@@ -287,7 +303,8 @@ export class RegistryService {
     const server = await this.getVisibleServer(auth, id);
     const { canManage } = await import('../domain/policy.js');
     if (!canManage(auth, server)) {
-      throw new Error('Only admins of this server may delete it');
+      // Still surfaced as 404 by the handler: must not leak existence.
+      throw new ForbiddenError('Only admins of this server may delete it');
     }
     server.deletedAt = new Date().toISOString();
     server.status = 'disabled';

@@ -222,7 +222,7 @@ describe('Multi-tenant credential isolation', () => {
         headers: user,
         payload: { description: 'hijacked' },
       });
-      expect(patch.statusCode).toBe(400);
+      expect(patch.statusCode).toBe(403);
 
       const disable = await app.inject({
         method: 'POST',
@@ -264,6 +264,32 @@ describe('Multi-tenant credential isolation', () => {
         headers: other,
       });
       expect(del.statusCode).toBe(404);
+    });
+
+    it('forbids plain users from validate, refresh and disconnect', async () => {
+      const user = { 'x-test-user': 'u9', 'x-test-role': 'user', 'x-test-tenant': 't1' };
+
+      const validate = await app.inject({
+        method: 'POST',
+        url: `/api/servers/${serverId}/validate`,
+        headers: user,
+      });
+      expect(validate.statusCode).toBe(403);
+
+      const refresh = await app.inject({
+        method: 'POST',
+        url: `/api/servers/${serverId}/tools/refresh`,
+        headers: user,
+      });
+      expect(refresh.statusCode).toBe(403);
+
+      // disconnect flips server-global status/index: 404 to hide existence
+      const disconnect = await app.inject({
+        method: 'POST',
+        url: `/api/servers/${serverId}/disconnect`,
+        headers: user,
+      });
+      expect(disconnect.statusCode).toBe(404);
     });
 
     it('allows the owning tenant admin', async () => {

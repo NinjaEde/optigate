@@ -6,6 +6,7 @@ import {
   hashApiKey,
   prefixOfSecret,
 } from '../../src/services/apiKeyService';
+import { NotFoundError } from '../../src/services/errors';
 import type { ApiKey } from '../../src/domain/types';
 import type { AuthContext } from '../../src/domain/types';
 
@@ -71,6 +72,17 @@ describe('ApiKeyService', () => {
     expect(await svc.verifyKey(live.secret)).not.toBeNull();
     await svc.revokeKey(ADMIN, live.key.id);
     expect(await svc.verifyKey(live.secret)).toBeNull();
+  });
+
+  it('rejects unparseable expiresAt instead of defaulting to forever', async () => {
+    await expect(
+      svc.createKey(ADMIN, {
+        name: 'bogus-expiry',
+        role: 'user',
+        tenantId: 't1',
+        expiresAt: 'gestern',
+      }),
+    ).rejects.toThrow(/ISO-8601/i);
   });
 
   it('enforces role cap and tenant scope on creation', async () => {
@@ -139,6 +151,8 @@ describe('ApiKeyService', () => {
       tenantId: 't9',
     });
     await expect(svc.revokeKey(ADMIN, other.key.id)).rejects.toThrow(/own tenant/i);
-    await expect(svc.revokeKey(ADMIN, 'missing-id')).rejects.toThrow(/not found/i);
+    await expect(svc.revokeKey(ADMIN, 'missing-id')).rejects.toThrow(
+      NotFoundError,
+    );
   });
 });

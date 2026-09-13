@@ -145,6 +145,10 @@ export const api = {
     request<{ tools: ToolMeta[] }>(`/servers/${id}/tools/refresh`, { method: 'POST' }),
   getTools: (id: string) => request<ToolMeta[]>(`/servers/${id}/tools`),
   audit: () => request<AuditEvent[]>('/audit'),
+  whoami: () =>
+    request<{ userId: string; role: string; tenantId: string | null }>(
+      '/whoami',
+    ),
   listApiKeys: () => request<{ keys: ApiKey[] }>('/api-keys'),
   createApiKey: (payload: {
     name: string;

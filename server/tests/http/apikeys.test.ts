@@ -140,6 +140,28 @@ describe('Gateway API keys', () => {
     expect(denied.statusCode).toBe(403);
   });
 
+  it('exposes the caller identity on /api/whoami (but never to keys)', async () => {
+    const me = await app.inject({
+      method: 'GET',
+      url: '/api/whoami',
+      headers: { 'x-test-user': 'admin' },
+    });
+    expect(me.statusCode).toBe(200);
+    expect(me.json()).toMatchObject({ userId: 'u1', role: 'admin', tenantId: 't1' });
+
+    const { body } = await createKey('admin', {
+      name: 'noself',
+      role: 'user',
+      tenantId: 't1',
+    });
+    const keyed = await app.inject({
+      method: 'GET',
+      url: '/api/whoami',
+      headers: { 'x-api-key': body.secret as string },
+    });
+    expect(keyed.statusCode).toBe(403);
+  });
+
   it('rejects unknown, revoked and expired keys on /mcp', async () => {
     const bad = await app.inject({
       method: 'POST',

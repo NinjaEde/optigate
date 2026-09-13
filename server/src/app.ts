@@ -14,6 +14,7 @@ import { createMcpGateway } from './infra/mcp/gateway.js';
 import { ToolIndexReconciler } from './infra/mcp/toolIndexReconciler.js';
 import type { ICredentialResolver } from './infra/mcp/credentialResolver.js';
 import type { ApiKeyService } from './services/apiKeyService.js';
+import { ForbiddenError, NotFoundError } from './services/errors.js';
 import type {
   AuthContext,
   MCPServer,
@@ -366,7 +367,10 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
           ),
         );
       } catch (err) {
-        reply.code(400).send({ error: (err as Error).message });
+        // Policy denials are 403; everything else stays 400 (validation).
+        reply
+          .code(err instanceof ForbiddenError ? 403 : 400)
+          .send({ error: (err as Error).message });
       }
     },
   );
@@ -402,12 +406,13 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 
   // ── Disconnect: close the pool connection and drop cached tools ───────
   // Superadmin disconnects ALL tenant connections; everyone else only
-  // their own tenant scope.
+  // their own tenant scope. Requires manage rights: status and index
+  // changes are server-global, not tenant-scoped.
   app.post('/api/servers/:id/disconnect', async (request, reply) => {
     const { id } = request.params as { id: string };
     try {
       const auth = getAuth(request);
-      const server = await registry.getVisibleServer(auth, id);
+      const server = await registry.getManageableServer(auth, id);
 
       if (auth.role === 'superadmin') {
         await options.pool.disconnectAll(server.id);
@@ -424,8 +429,9 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       triggerReconcile(); // keep reconciler state consistent
 
       return { disconnected: true, id: server.id, status: 'offline' };
-    } catch (err) {
-      reply.code(404).send({ error: (err as Error).message });
+    } catch {
+      // Deliberately 404 for policy denials too: must not leak existence.
+      reply.code(404).send({ error: 'Server not found' });
     }
   });
 
@@ -437,6 +443,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       toolsByServer.delete(id);
       reply.code(204).send();
     } catch {
+      // Deliberately 404 for policy denials too: must not leak existence.
       reply.code(404).send({ error: 'Server not found' });
     }
   });
@@ -447,14 +454,20 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
    * Validates a server: attempts a real connection via the client pool
    * (initialize + tools/list), updates health status accordingly and
    * caches the discovered tools. Returns the tool list on success.
+   * Requires manage rights: opens real upstream connections and flips
+   * server-global status.
    */
   app.post('/api/servers/:id/validate', async (request, reply) => {
     const { id } = request.params as { id: string };
     let server: MCPServer;
 
     try {
-      server = await registry.getVisibleServer(getAuth(request), id);
-    } catch {
+      server = await registry.getManageableServer(getAuth(request), id);
+    } catch (err) {
+      if (err instanceof ForbiddenError) {
+        reply.code(403).send({ error: (err as Error).message });
+        return;
+      }
       reply.code(404).send({ error: 'Server not found' });
       return;
     }
@@ -488,11 +501,17 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
   app.post('/api/servers/:id/tools/refresh', async (request, reply) => {
     const { id } = request.params as { id: string };
     try {
-      const server = await registry.getVisibleServer(getAuth(request), id);
+      // Manage rights required: opens a real upstream connection and
+      // rewrites the server-global tool index.
+      const server = await registry.getManageableServer(getAuth(request), id);
       const tools = await options.pool.syncTools(server, getAuth(request));
       toolsByServer.set(id, tools);
       return { tools };
     } catch (err) {
+      if (err instanceof ForbiddenError) {
+        reply.code(403).send({ error: (err as Error).message });
+        return;
+      }
       reply.code(502).send({ error: (err as Error).message });
     }
   });
@@ -707,6 +726,12 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 
   // ── Audit feed ────────────────────────────────────────────────────────
 
+  // ── Own identity (lets the UI gate admin-only views) ────────────────
+  app.get('/api/whoami', async (request) => {
+    const auth = getAuth(request);
+    return { userId: auth.userId, role: auth.role, tenantId: auth.tenantId };
+  });
+
   app.get('/api/audit', async (request) => {
     const auth = getAuth(request);
     return typeof options.registry.audit.recent === 'function'
@@ -773,10 +798,9 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     try {
       return await options.apiKeys.revokeKey(getAuth(request), id);
     } catch (err) {
-      const message = (err as Error).message;
       reply
-        .code(message.includes('not found') ? 404 : 403)
-        .send({ error: message });
+        .code(err instanceof NotFoundError ? 404 : 403)
+        .send({ error: (err as Error).message });
     }
   });
 

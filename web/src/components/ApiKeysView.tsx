@@ -32,7 +32,15 @@ const inputClass =
 const labelClass =
   'text-xs font-medium uppercase tracking-wider text-muted';
 
-export function ApiKeysView() {
+export function ApiKeysView({
+  tenantId = null,
+  tenantLocked = false,
+}: {
+  /** Caller tenant for prefilling (from /api/whoami). */
+  tenantId?: string | null;
+  /** Non-superadmins can only create keys for their own tenant. */
+  tenantLocked?: boolean;
+}) {
   const t = useT().apikeys;
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [loading, setLoading] = useState(true);
@@ -241,6 +249,8 @@ export function ApiKeysView() {
       {dialogOpen && (
         <CreateDialog
           panelRef={panelRef}
+          initialTenant={tenantId ?? ''}
+          tenantLocked={tenantLocked}
           onClose={() => setDialogOpen(false)}
           onCreated={(secret) => {
             setDialogOpen(false);
@@ -256,11 +266,15 @@ export function ApiKeysView() {
 
 function CreateDialog({
   panelRef,
+  initialTenant,
+  tenantLocked,
   onClose,
   onCreated,
   onError,
 }: {
   panelRef: RefObject<HTMLFormElement>;
+  initialTenant: string;
+  tenantLocked: boolean;
   onClose: () => void;
   onCreated: (secret: string) => void;
   onError: (msg: string) => void;
@@ -268,7 +282,7 @@ function CreateDialog({
   const t = useT().apikeys;
   const [name, setName] = useState('');
   const [role, setRole] = useState<ApiKeyRole>('user');
-  const [tenant, setTenant] = useState('');
+  const [tenant, setTenant] = useState(initialTenant);
   const [expires, setExpires] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -354,7 +368,8 @@ function CreateDialog({
               value={tenant}
               onChange={(e) => setTenant(e.target.value)}
               placeholder={t.tenantPlaceholder}
-              className={inputClass}
+              disabled={tenantLocked}
+              className={`${inputClass} disabled:opacity-60`}
             />
           </label>
         </div>

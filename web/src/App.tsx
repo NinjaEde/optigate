@@ -51,6 +51,10 @@ function AppBody({ onSwitchLang }: { onSwitchLang: (lang: Lang) => void }) {
   const [editId, setEditId] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [view, setView] = useState<View>('servers');
+  const [identity, setIdentity] = useState<{
+    role: string;
+    tenantId: string | null;
+  } | null>(null);
 
   async function reload() {
     try {
@@ -64,7 +68,14 @@ function AppBody({ onSwitchLang }: { onSwitchLang: (lang: Lang) => void }) {
 
   useEffect(() => {
     void reload();
+    // Own identity for gating admin-only views; failure keeps the nav
+    // visible (endpoints still enforce server-side).
+    api.whoami().then(setIdentity, () => undefined);
   }, []);
+
+  // Hide key management only once a plain-user role is confirmed —
+  // avoids nav flicker while the identity loads.
+  const mayManageKeys = identity?.role !== 'user';
 
   function handleValidated(id: string, tools: ToolMeta[]) {
     setToolsByServer((prev) => ({ ...prev, [id]: tools }));
@@ -130,7 +141,9 @@ function AppBody({ onSwitchLang }: { onSwitchLang: (lang: Lang) => void }) {
                 [
                   ['servers', t.app.views.servers, <Server key="i" size={15} />],
                   ['tools', t.app.views.tools, <Wrench key="i" size={15} />],
-                  ['apikeys', t.app.views.apikeys, <KeyRound key="i" size={15} />],
+                  ...(mayManageKeys
+                    ? [['apikeys', t.app.views.apikeys, <KeyRound key="i" size={15} />] as const]
+                    : []),
                   ['audit', t.app.views.audit, <ScrollText key="i" size={15} />],
                 ] as const
               ).map(([key, label, icon]) => (
@@ -242,7 +255,10 @@ function AppBody({ onSwitchLang }: { onSwitchLang: (lang: Lang) => void }) {
         {view === 'tools' ? (
           <ToolSearchView />
         ) : view === 'apikeys' ? (
-          <ApiKeysView />
+          <ApiKeysView
+            tenantId={identity?.tenantId ?? null}
+            tenantLocked={identity !== null && identity.role !== 'superadmin'}
+          />
         ) : view === 'audit' ? (
           <div className="overflow-hidden rounded-xl border border-line bg-panel/80">
             <table className="w-full min-w-[640px] text-left text-sm">

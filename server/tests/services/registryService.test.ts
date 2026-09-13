@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 
 import { InMemoryServerRepository } from '../../src/infra/repositories/memoryServerRepository';
 import { RegistryService } from '../../src/services/registryService';
+import { ForbiddenError } from '../../src/services/errors';
 import type { AuthContext } from '../../src/domain/types';
 import type { SearchableTool } from '../../src/domain/toolSearch';
 
@@ -128,11 +129,16 @@ describe('RegistryService.manage authorization', () => {
     });
     const user: AuthContext = { userId: 'u2', role: 'user', tenantId: 't1' };
 
+    // policy denials are typed so HTTP handlers can map status codes
     await expect(
       svc.updateServer(user, srv.id, { description: 'x' }),
-    ).rejects.toThrow(/admin/i);
-    await expect(svc.disableServer(user, srv.id)).rejects.toThrow(/admin/i);
-    await expect(svc.deleteServer(user, srv.id)).rejects.toThrow(/admin/i);
+    ).rejects.toThrow(ForbiddenError);
+    await expect(svc.disableServer(user, srv.id)).rejects.toThrow(
+      ForbiddenError,
+    );
+    await expect(svc.deleteServer(user, srv.id)).rejects.toThrow(
+      ForbiddenError,
+    );
   });
 
   it('rejects tenant-scoped registration without a tenant', async () => {

@@ -117,8 +117,12 @@ every visible registry server.
 
 For machine clients (agents, CI) without Keycloak, admins can issue
 **gateway API keys** (`POST /api/api-keys` — admin: own tenant only,
-superadmin: any tenant). Keys are gateway-only (`/mcp`, never `/api`),
-bound to a user/role/tenant, and shown in plaintext exactly once:
+superadmin: any tenant; also manageable in the UI's API-Keys view).
+Keys are gateway-only (`/mcp`, never `/api`), bound to a
+user/role/tenant, and shown in plaintext exactly once. Note: on the
+gateway, visibility only distinguishes superadmin keys (platform-wide)
+from the rest (tenant-scoped) — an admin key sees what a user key of the
+same tenant sees:
 
 ```json
 {

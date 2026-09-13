@@ -6,6 +6,7 @@ import type {
   AuthContext,
 } from '../domain/types.js';
 import type { AuditSink } from './registryService.js';
+import { NotFoundError } from './errors.js';
 
 export const API_KEY_PREFIX = 'og_';
 const SECRET_BYTES = 32;
@@ -46,6 +47,10 @@ export function prefixOfSecret(secret: string): string {
 /**
  * Prefix as stored before the double-prefix fix (og_og_…): still accepted
  * on verify so already-issued keys keep working.
+ *
+ * TODO: remove once all pre-fix keys are rotated (or backfill stored
+ * prefixes with a one-time UPDATE), plus drop the displayPrefix
+ * normalization in web/src/components/ApiKeysView.tsx.
  */
 function legacyPrefixOfSecret(secret: string): string {
   return `${API_KEY_PREFIX}${secret.slice(0, 8)}`;
@@ -88,6 +93,11 @@ export class ApiKeyService {
    * Issues a gateway-only API key. Admins may create keys for their own
    * tenant only and never above their own role; superadmins are
    * unrestricted. API keys themselves can never create keys.
+   *
+   * Note on roles: on the gateway (/mcp) visibility only distinguishes
+   * superadmin (platform-wide) from the rest (tenant-scoped) — an admin
+   * key sees exactly what a user key of the same tenant sees. Roles are
+   * stored for forward compatibility and audit clarity, not enforcement.
    */
   async createKey(
     auth: AuthContext,
@@ -101,6 +111,14 @@ export class ApiKeyService {
     }
     if (!input.name) {
       throw new Error('Key name is required');
+    }
+    // Fail closed: an unparseable expiry must never silently mean "forever".
+    if (
+      input.expiresAt !== undefined
+      && input.expiresAt !== null
+      && Number.isNaN(Date.parse(input.expiresAt))
+    ) {
+      throw new Error('expiresAt must be a valid ISO-8601 date');
     }
     if (roleRank(input.role) > roleRank(auth.role)) {
       throw new Error('Key role must not exceed your own role');
@@ -200,7 +218,7 @@ export class ApiKeyService {
     }
     const key = await this.store.findById(id);
     if (!key) {
-      throw new Error('API key not found');
+      throw new NotFoundError('API key not found');
     }
     if (
       auth.role === 'admin'

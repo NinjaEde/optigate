@@ -24,6 +24,7 @@ vi.mock('../src/api', () => ({
       },
     ]),
     audit: vi.fn().mockResolvedValue([]),
+    whoami: vi.fn().mockResolvedValue({ userId: 'u0', role: 'superadmin', tenantId: null }),
     deleteServer: vi.fn(),
     disableServer: vi.fn(),
     approveServer: vi.fn(),
