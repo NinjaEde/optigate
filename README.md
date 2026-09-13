@@ -224,9 +224,21 @@ Without these headers every dev request acts as the default superadmin in
 | `KEYCLOAK_URL` | – | Keycloak issuer URL |
 | `KEYCLOAK_REALM` | – | Keycloak realm name |
 | `KEYCLOAK_AUDIENCE` | realm value | Expected JWT audience |
-| `SSRF_ALLOWED_HOSTS` | – | Comma‑separated allowed hosts/globs for outgoing MCP connections; unset blocks only loopback/link‑local |
+| `SSRF_ALLOWED_HOSTS` | – | Comma‑separated allowed hosts/globs for outgoing MCP connections; when set, only listed hosts connect; unset allows all routable targets except loopback/private/link‑local |
+| `SSRF_ALLOW_PRIVATE_RANGES` | `false` | Home‑lab escape hatch: also allow loopback/private/link‑local targets (also as `ssrf.allowPrivateRanges` setting) |
+| `RATE_LIMIT_MAX` | `200` | Global rate limit (requests/minute/IP, also as `ratelimit.max` setting) |
+| `RECONCILE_INTERVAL_MS` / `RECONCILE_RETRY_MS` / `RECONCILE_MAX_STALE` | `60000` / `5000` / `10` | Tool index refresh tuning (also as `reconciler.*` settings) |
+| `SEARCH_DEFAULT_LIMIT` / `SEARCH_MAX_LIMIT` | `5` / `20` | Tool retrieval top‑k bounds (also as `search.*` settings) |
+| `AUDIT_LIMIT` | `100` | Audit feed length (also as `audit.limit` setting) |
+| `GATEWAY_DISPATCH_TIMEOUT_MS` | `30000` | Per‑request timeout of the `/mcp` gateway (also as `gateway.dispatchTimeoutMs` setting) |
 | `CORS_ORIGIN` | all origins | Comma‑separated allowed CORS origins for the API |
-| `MAX_CONNS_PER_SERVER` | `20` | Max simultaneous connections per upstream MCP server |
+| `MAX_CONNS_PER_SERVER` | `20` | Max simultaneous connections per upstream MCP server (also as `pool.maxConnsPerServer` setting) |
+
+All of the above (plus `registry.approvalRequired`) are runtime‑tunable by
+admins in the UI's **Settings** view (`GET/PUT/DELETE /api/settings`) —
+precedence: database value > environment variable > built‑in default.
+Security‑sensitive keys (`ssrf.*`, `registry.approvalRequired`) require
+superadmin; every change is audited as `setting.changed`.
 
 ## Security features
 

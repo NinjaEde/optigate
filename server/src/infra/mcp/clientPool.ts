@@ -93,9 +93,9 @@ export interface McpClientPoolOptions {
   /**
    * Max simultaneously open connections per server record. Beyond this,
    * the least recently used tenant connection is closed (lazy reconnect
-   * on next use). Default: 20.
+   * on next use). Default: 20. Accepts a getter for runtime tuning.
    */
-  maxConnectionsPerServer?: number;
+  maxConnectionsPerServer?: number | (() => number);
   /**
    * Credential resolver for per-tenant credential bindings.
    * When provided, the pool resolves per-tenant auth overrides
@@ -115,7 +115,7 @@ export class McpClientPool {
    * share one attempt instead of each spawning (and leaking) a connection. */
   private readonly pending = new Map<string, Promise<PooledConnection>>();
   private readonly toolCache = new Map<string, ToolMeta[]>();
-  private readonly maxConnectionsPerServer: number;
+  private readonly maxConnectionsPerServer: number | (() => number);
   private readonly credentialResolver?: ICredentialResolver;
 
   constructor(
@@ -290,6 +290,12 @@ export class McpClientPool {
     return performance.now();
   }
 
+  private maxConns(): number {
+    return typeof this.maxConnectionsPerServer === 'function'
+      ? this.maxConnectionsPerServer()
+      : this.maxConnectionsPerServer;
+  }
+
   /** Closes the LRU connection of this server when at capacity. */
   private evictIfNeeded(serverId: string): void {
     const prefix = `${serverId}::`;
@@ -297,7 +303,7 @@ export class McpClientPool {
       k.startsWith(prefix),
     );
 
-    if (siblings.length < this.maxConnectionsPerServer) {
+    if (siblings.length < this.maxConns()) {
       return;
     }
 

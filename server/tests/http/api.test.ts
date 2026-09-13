@@ -4,6 +4,8 @@ import { buildApp } from '../../src/app';
 import { InMemoryServerRepository } from '../../src/infra/repositories/memoryServerRepository';
 import { InMemoryAuditLog } from '../../src/infra/repositories/memoryAuditLog';
 import { InMemoryApiKeyStore } from '../../src/infra/repositories/memoryApiKeyStore';
+import { InMemorySettingsStore } from '../../src/infra/repositories/memorySettingsStore';
+import { SettingsService } from '../../src/services/settingsService';
 import { ApiKeyService } from '../../src/services/apiKeyService';
 import { McpClientPool } from '../../src/infra/mcp/clientPool';
 import { CredentialResolver } from '../../src/infra/mcp/credentialResolver';
@@ -37,6 +39,7 @@ async function makeApp() {
     }),
     credentials: new CredentialResolver(),
     apiKeys: new ApiKeyService(new InMemoryApiKeyStore(), audit),
+    settings: new SettingsService(new InMemorySettingsStore(), audit),
     approvalRequired: false,
   });
   await app.ready();

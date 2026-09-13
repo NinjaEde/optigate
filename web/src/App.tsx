@@ -9,6 +9,7 @@ import {
   X,
   Wrench,
   KeyRound,
+  SlidersHorizontal,
 } from 'lucide-react';
 
 import { api, type MCPServer, type AuditEvent, type ToolMeta } from './api';
@@ -16,10 +17,11 @@ import { ServerDialog } from './components/ServerDialog';
 import { ServerCard } from './components/ServerCard';
 import { ToolSearchView } from './components/ToolSearchView';
 import { ApiKeysView } from './components/ApiKeysView';
+import { SettingsView } from './components/SettingsView';
 import { LanguageDropdown } from './components/LanguageDropdown';
 import { LangContext, useLang, useT, type Lang } from './i18n';
 
-type View = 'servers' | 'tools' | 'audit' | 'apikeys';
+type View = 'servers' | 'tools' | 'audit' | 'apikeys' | 'settings';
 
 export function App() {
   const [lang, setLang] = useState<Lang>(() => {
@@ -77,10 +79,9 @@ function AppBody({ onSwitchLang }: { onSwitchLang: (lang: Lang) => void }) {
     api.whoami().then(setIdentity, () => undefined);
   }, []);
 
-  // Fail closed: key management appears only for confirmed admin
-  // identities (briefly hidden for everyone while loading).
-  const mayManageKeys =
-    identity !== null && identity.role !== 'user';
+  // Fail closed: key and settings management appear only for
+  // confirmed admin identities (briefly hidden for everyone while loading).
+  const mayManage = identity !== null && identity.role !== 'user';
 
   function handleValidated(id: string, tools: ToolMeta[]) {
     setToolsByServer((prev) => ({ ...prev, [id]: tools }));
@@ -146,8 +147,11 @@ function AppBody({ onSwitchLang }: { onSwitchLang: (lang: Lang) => void }) {
                 [
                   ['servers', t.app.views.servers, <Server key="i" size={15} />],
                   ['tools', t.app.views.tools, <Wrench key="i" size={15} />],
-                  ...(mayManageKeys
+                  ...(mayManage
                     ? [['apikeys', t.app.views.apikeys, <KeyRound key="i" size={15} />] as const]
+                    : []),
+                  ...(mayManage
+                    ? [['settings', t.app.views.settings, <SlidersHorizontal key="i" size={15} />] as const]
                     : []),
                   ['audit', t.app.views.audit, <ScrollText key="i" size={15} />],
                 ] as const
@@ -205,7 +209,7 @@ function AppBody({ onSwitchLang }: { onSwitchLang: (lang: Lang) => void }) {
               )}
             </label>
 
-            <dl className="flex flex-wrap items-center gap-x-8 gap-y-2 text-sm">
+            <dl data-testid="server-stats" className="flex flex-wrap items-center gap-x-8 gap-y-2 text-sm">
               <div className="flex items-baseline gap-2">
                 <dt className="text-muted">{t.stats.servers}</dt>
                 <dd className="font-display text-lg font-semibold tabular-nums">
@@ -264,6 +268,8 @@ function AppBody({ onSwitchLang }: { onSwitchLang: (lang: Lang) => void }) {
             tenantId={identity?.tenantId ?? null}
             tenantLocked={identity !== null && identity.role !== 'superadmin'}
           />
+        ) : view === 'settings' ? (
+          <SettingsView role={identity?.role ?? null} />
         ) : view === 'audit' ? (
           <div
             role="region"

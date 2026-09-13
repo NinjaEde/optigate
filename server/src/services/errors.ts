@@ -15,3 +15,10 @@ export class ForbiddenError extends Error {
     this.name = 'ForbiddenError';
   }
 }
+
+export class ValidationError extends Error {
+  constructor(message = 'Invalid value') {
+    super(message);
+    this.name = 'ValidationError';
+  }
+}

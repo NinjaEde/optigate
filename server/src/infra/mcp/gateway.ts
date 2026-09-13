@@ -21,6 +21,15 @@ export interface ToolIndexProvider {
 export interface GatewayOptions {
   resolveAuth(request: { headers: Record<string, unknown> }): Promise<AuthContext>;
   listVisibleServers(auth: AuthContext): Promise<MCPServer[]>;
+  /**
+   * Timeout per JSON-RPC dispatch in ms. Accepts a getter for runtime
+   * tuning. Default: 30_000.
+   */
+  dispatchTimeoutMs?: number | (() => number);
+  /** Default top-k for search_tools. Getter allowed. Default: 5. */
+  searchDefaultLimit?: number | (() => number);
+  /** Max top-k any client may request. Getter allowed. Default: 20. */
+  searchMaxLimit?: number | (() => number);
   buildToolIndex: ToolIndexProvider;
   searchTools(
     tools: Array<ToolMeta & { serverName: string }>,
@@ -68,7 +77,15 @@ export function createMcpGateway(options: GatewayOptions) {
   const buildServer = (): McpServer =>
     new McpServer({ name: SERVER_INFO.name, version: SERVER_INFO.version });
 
+  const resolveLimit = (
+    opt: number | (() => number) | undefined,
+    fallback: number,
+  ): number =>
+    typeof opt === 'function' ? opt() : (opt ?? fallback);
+
   const registerTools = (server: McpServer, auth: AuthContext) => {
+    const defaultLimit = resolveLimit(options.searchDefaultLimit, 5);
+    const maxLimit = resolveLimit(options.searchMaxLimit, 20);
     server.registerTool(
       'search_tools',
       {
@@ -79,7 +96,7 @@ export function createMcpGateway(options: GatewayOptions) {
           + 'Nutze dieses Tool vor execute_tool.',
         inputSchema: {
           query: z.string().describe('Freitext-Suche über Namen/Beschreibungen'),
-          k: z.number().int().min(1).max(20).default(5).optional(),
+          k: z.number().int().min(1).max(maxLimit).default(defaultLimit).optional(),
         },
       },
       async ({ query, k }) => {
@@ -88,7 +105,7 @@ export function createMcpGateway(options: GatewayOptions) {
         const results = await options.searchTools(
           index,
           query ?? '',
-          Math.min(k ?? 5, 20),
+          Math.min(k ?? defaultLimit, maxLimit),
         );
 
         return {
@@ -215,8 +232,12 @@ export function createMcpGateway(options: GatewayOptions) {
       // deliver from the CLIENT end of the pair → McpServer answers back
       await clientTransport.send(body as never);
 
+      const timeoutMs =
+        typeof options.dispatchTimeoutMs === 'function'
+          ? options.dispatchTimeoutMs()
+          : (options.dispatchTimeoutMs ?? 30_000);
       const timeout = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('MCP dispatch timeout')), 30_000),
+        setTimeout(() => reject(new Error('MCP dispatch timeout')), timeoutMs),
       );
       const response = await Promise.race([responsePromise, timeout]);
 

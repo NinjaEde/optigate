@@ -74,6 +74,40 @@ describe('embeddedIPv4', () => {
   });
 });
 
+describe('assertAllowedUrl (allowPrivateRanges opt-out)', () => {
+  const flag = { allowPrivateRanges: true };
+
+  it.each([
+    'http://192.168.1.1/mcp',
+    'http://10.0.0.5/mcp',
+    'http://127.0.0.1:8100/mcp',
+    'http://localhost:8100/mcp',
+    'http://[::1]/mcp',
+  ])('allows %s with the flag', async (url) => {
+    await expect(assertAllowedUrl(url, flag)).resolves.toBeUndefined();
+  });
+
+  it('still enforces a configured allowlist', async () => {
+    await expect(
+      assertAllowedUrl('http://192.168.1.1/mcp', {
+        allowedHosts: 'other.example',
+        allowPrivateRanges: true,
+      }),
+    ).rejects.toThrow(/not in SSRF_ALLOWED_HOSTS/);
+  });
+
+  it('reads the flag from the environment', async () => {
+    process.env.SSRF_ALLOW_PRIVATE_RANGES = 'true';
+    try {
+      await expect(
+        assertAllowedUrl('http://192.168.1.1/mcp'),
+      ).resolves.toBeUndefined();
+    } finally {
+      delete process.env.SSRF_ALLOW_PRIVATE_RANGES;
+    }
+  });
+});
+
 describe('assertAllowedUrl (allowlist mode)', () => {
   it('allows listed hosts and rejects everything else', async () => {
     process.env.SSRF_ALLOWED_HOSTS = 'mcp.example.com, *.trusted.example';

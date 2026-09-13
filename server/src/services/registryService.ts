@@ -40,7 +40,8 @@ export interface AuditSink {
       | 'tool.searched'
       | 'tool.called'
       | 'apikey.created'
-      | 'apikey.revoked';
+      | 'apikey.revoked'
+      | 'setting.changed';
     subjectId: string | null;
     detail: Record<string, unknown>;
   }): Promise<void>;
@@ -50,8 +51,18 @@ export interface AuditSink {
 export class RegistryService {
   constructor(
     private readonly repo: ServerRepository,
-    private readonly options: { approvalRequired: boolean; audit?: AuditSink },
+    private readonly options: {
+      /** Static flag or live lookup (runtime settings). */
+      approvalRequired: boolean | (() => boolean);
+      audit?: AuditSink;
+    },
   ) {}
+
+  private isApprovalRequired(): boolean {
+    return typeof this.options.approvalRequired === 'function'
+      ? this.options.approvalRequired()
+      : this.options.approvalRequired;
+  }
 
   async registerServer(auth: AuthContext, input: RegisterServerInput): Promise<MCPServer> {
     const { canRegister, resolveStatusForNewServer } = await import(
@@ -92,7 +103,7 @@ export class RegistryService {
       ownerId: input.scope === 'private' ? auth.userId : null,
       transport: input.transport,
       connection: input.connection,
-      status: resolveStatusForNewServer(this.options.approvalRequired),
+      status: resolveStatusForNewServer(this.isApprovalRequired()),
       createdBy: auth.userId,
       createdAt: now,
       updatedAt: now,

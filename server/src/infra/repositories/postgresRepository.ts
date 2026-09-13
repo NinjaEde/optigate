@@ -204,6 +204,13 @@ function migrationSql(): string {
         created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
     );
     CREATE INDEX IF NOT EXISTS idx_api_keys_prefix ON api_keys (key_prefix);
+
+    CREATE TABLE IF NOT EXISTS app_settings (
+        key         TEXT PRIMARY KEY,
+        value       JSONB NOT NULL,
+        updated_by  TEXT NOT NULL,
+        updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
   `;
 }
 
@@ -262,6 +269,41 @@ export type { PoolClient };
 import type { ApiKey, AuthConfig } from '../../domain/types.js';
 import type { ICredentialResolver, CredentialBinding } from '../mcp/credentialResolver.js';
 import type { ApiKeyStore } from '../../services/apiKeyService.js';
+import type { SettingsStore } from '../../services/settingsService.js';
+
+/** Postgres-backed runtime settings overrides (app_settings table). */
+export class PostgresSettingsStore implements SettingsStore {
+  constructor(private readonly pool: Pool) {}
+
+  async get(key: string): Promise<unknown> {
+    const res = await this.pool.query<{ value: unknown }>(
+      `SELECT value FROM app_settings WHERE key = $1`,
+      [key],
+    );
+    return res.rows[0]?.value;
+  }
+
+  async set(key: string, value: unknown, updatedBy: string): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO app_settings (key, value, updated_by, updated_at)
+        VALUES ($1, $2, $3, now())
+        ON CONFLICT (key)
+        DO UPDATE SET value = $2, updated_by = $3, updated_at = now()`,
+      [key, JSON.stringify(value), updatedBy],
+    );
+  }
+
+  async delete(key: string): Promise<void> {
+    await this.pool.query(`DELETE FROM app_settings WHERE key = $1`, [key]);
+  }
+
+  async all(): Promise<Record<string, unknown>> {
+    const res = await this.pool.query<{ key: string; value: unknown }>(
+      `SELECT key, value FROM app_settings`,
+    );
+    return Object.fromEntries(res.rows.map((r) => [r.key, r.value]));
+  }
+}
 
 interface ApiKeyRow {
   id: string;

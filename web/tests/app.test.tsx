@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { render, screen, within, cleanup } from '@testing-library/react';
 
 import { App } from '../src/App';
 import * as api from '../src/api';
@@ -33,6 +33,12 @@ vi.mock('../src/api', () => ({
 }));
 
 describe('App', () => {
+  // no globals in vitest config → RTL auto-cleanup is off; unmount
+  // explicitly so renders don't leak across tests
+  afterEach(() => {
+    cleanup();
+  });
+
   it('renders registered servers from the API', async () => {
     render(<App />);
 
@@ -43,7 +49,13 @@ describe('App', () => {
   it('shows the server count in the header', async () => {
     render(<App />);
 
-    const subtitle = await screen.findByText(/1 Server/);
-    expect(subtitle).toBeInTheDocument();
+    // count ("1") and label ("Server") live in separate dt/dd elements
+    const stats = await screen.findByTestId('server-stats');
+    const label = within(stats).getByText('Server');
+    expect(label).toBeInTheDocument();
+    // the count sits in the dd of the same row
+    const row = label.closest('div');
+    expect(row).not.toBeNull();
+    expect(within(row as HTMLElement).getByText('1')).toBeInTheDocument();
   });
 });

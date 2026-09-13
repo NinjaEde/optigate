@@ -114,7 +114,8 @@ export interface AuditEvent {
     | 'tool.searched'
     | 'tool.called'
     | 'apikey.created'
-    | 'apikey.revoked';
+    | 'apikey.revoked'
+    | 'setting.changed';
   subjectId: string | null;
   detail: Record<string, unknown>;
 }

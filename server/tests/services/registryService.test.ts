@@ -36,6 +36,31 @@ describe('RegistryService.registerServer', () => {
     expect(created.tenantId).toBe('t1');
   });
 
+  it('supports a live approvalRequired lookup (runtime settings)', async () => {
+    let required = true;
+    const svc = new RegistryService(new InMemoryServerRepository(), {
+      approvalRequired: () => required,
+    });
+    const pending = await svc.registerServer(authAdmin, {
+      name: 'gated',
+      description: '',
+      scope: 'tenant',
+      transport: 'streamable_http',
+      connection: { url: 'https://g.example.com' },
+    });
+    expect(pending.status).toBe('pending_approval');
+
+    required = false;
+    const open = await svc.registerServer(authAdmin, {
+      name: 'ungated',
+      description: '',
+      scope: 'tenant',
+      transport: 'streamable_http',
+      connection: { url: 'https://h.example.com' },
+    });
+    expect(open.status).toBe('healthy');
+  });
+
   it('rejects duplicate names within the same tenant', async () => {
     const input = {
       name: 'dup',

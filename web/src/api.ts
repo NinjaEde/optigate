@@ -78,6 +78,17 @@ export interface ApiKey {
   createdAt: string;
 }
 
+export interface Setting {
+  key: string;
+  type: 'string' | 'number' | 'boolean';
+  value: string | number | boolean;
+  source: 'db' | 'env' | 'default';
+  minRole: 'superadmin' | 'admin';
+  min?: number;
+  max?: number;
+  description: string;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   // POST/PATCH without payload must not advertise a JSON body,
   // otherwise Fastify rejects the empty body with FST_ERR_CTP_EMPTY_JSON_BODY.
@@ -162,6 +173,16 @@ export const api = {
     }),
   revokeApiKey: (id: string) =>
     request<ApiKey>(`/api-keys/${id}`, { method: 'DELETE' }),
+  listSettings: () => request<{ settings: Setting[] }>('/settings'),
+  updateSetting: (key: string, value: string | number | boolean) =>
+    request<Setting>(`/settings/${encodeURIComponent(key)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ value }),
+    }),
+  resetSetting: (key: string) =>
+    request<Setting>(`/settings/${encodeURIComponent(key)}`, {
+      method: 'DELETE',
+    }),
   /** Same retrieval path as the MCP facade's search_tools meta-tool. */
   searchTools: (query: string, limit: number) =>
     request<{

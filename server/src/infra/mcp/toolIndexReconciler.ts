@@ -20,10 +20,16 @@ export interface ReconcilerDeps {
 }
 
 export interface ToolIndexReconcilerOptions {
-  /** Delay between retries per server (ms). Default 5s. */
-  retryDelayMs?: number;
-  /** Background refresh interval (ms). Default 60s. */
-  intervalMs?: number;
+  /**
+   * Delay between retries per server (ms). Default 5s. Accepts a getter
+   * for runtime tuning.
+   */
+  retryDelayMs?: number | (() => number);
+  /**
+   * Background refresh interval (ms). Default 60s. Accepts a getter
+   * for runtime tuning.
+   */
+  intervalMs?: number | (() => number);
   /**
    * Jitter max fraction of interval to add randomly (0–1).
    * Default 0.2 (so the actual interval varies ±20% around intervalMs).
@@ -31,9 +37,10 @@ export interface ToolIndexReconcilerOptions {
   jitter?: number;
   /**
    * How many consecutive cycles an unreachable server's stale tools are
-   * kept before being dropped from the index. Default 10.
+   * kept before being dropped from the index. Default 10. Accepts a
+   * getter for runtime tuning.
    */
-  maxStaleCycles?: number;
+  maxStaleCycles?: number | (() => number);
   /** Logger for diagnostics. */
   log?: (msg: string) => void;
 }
@@ -62,10 +69,10 @@ export class ToolIndexReconciler {
   private running = false;
   /** Ad-hoc reconcileNow() while running → one coalesced extra pass. */
   private pending = false;
-  private readonly retryDelayMs: number;
-  private readonly intervalMs: number;
+  private readonly retryDelayMs: number | (() => number);
+  private readonly intervalMs: number | (() => number);
   private readonly jitter: number;
-  private readonly maxStaleCycles: number;
+  private readonly maxStaleCycles: number | (() => number);
   private readonly log: (msg: string) => void;
   /** Track consecutive failures per server to set degraded status. */
   private readonly consecutiveFailures = new Map<string, number>();
@@ -81,6 +88,10 @@ export class ToolIndexReconciler {
     this.jitter = options.jitter ?? DEFAULT_JITTER;
     this.maxStaleCycles = options.maxStaleCycles ?? DEFAULT_MAX_STALE_CYCLES;
     this.log = options.log ?? (() => undefined);
+  }
+
+  private resolve(opt: number | (() => number)): number {
+    return typeof opt === 'function' ? opt() : opt;
   }
 
   /** Defensive copy — consumers must not mutate the live index. */
@@ -141,9 +152,9 @@ export class ToolIndexReconciler {
             `tool sync failed for "${server.name}" `
             + `(attempt ${attempt}/3): ${(err as Error).message}`,
           );
-          if (attempt < 3) {
-            await delay(this.retryDelayMs);
-          }
+            if (attempt < 3) {
+              await delay(this.resolve(this.retryDelayMs));
+            }
         }
       }
 
@@ -179,7 +190,7 @@ export class ToolIndexReconciler {
       } else if (tools === null && previous) {
         // unreachable but previously indexed → keep a bounded stale copy
         const stale = (this.staleCycles.get(server.id) ?? 0) + 1;
-        if (stale <= this.maxStaleCycles) {
+        if (stale <= this.resolve(this.maxStaleCycles)) {
           this.staleCycles.set(server.id, stale);
           nextIndex.set(server.id, previous);
         } else {
@@ -224,8 +235,9 @@ export class ToolIndexReconciler {
     );
 
     const scheduleNext = () => {
-      const jitterMs = Math.random() * this.intervalMs * this.jitter;
-      const delayMs = this.intervalMs - (this.intervalMs * this.jitter) / 2 + jitterMs;
+      const interval = this.resolve(this.intervalMs);
+      const jitterMs = Math.random() * interval * this.jitter;
+      const delayMs = interval - (interval * this.jitter) / 2 + jitterMs;
       this.timer = setTimeout(() => {
         void this.reconcileNow().catch((err) =>
           this.log(`reconcile failed: ${(err as Error).message}`),

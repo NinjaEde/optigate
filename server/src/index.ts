@@ -6,6 +6,7 @@ import {
   PostgresServerRepository,
   PostgresAuditLog,
   PostgresCredentialResolver,
+  PostgresSettingsStore,
 } from './infra/repositories/postgresRepository.js';
 import { McpClientPool } from './infra/mcp/clientPool.js';
 import { createSdkTransport } from './infra/mcp/sdkTransport.js';
@@ -13,9 +14,10 @@ import { verifyKeycloakToken } from './infra/auth/keycloak.js';
 import { InMemoryCredentialResolver } from './infra/mcp/credentialResolver.js';
 import { ApiKeyService } from './services/apiKeyService.js';
 import { InMemoryApiKeyStore } from './infra/repositories/memoryApiKeyStore.js';
+import { SettingsService } from './services/settingsService.js';
+import { InMemorySettingsStore } from './infra/repositories/memorySettingsStore.js';
 
 const PORT = Number(process.env.PORT ?? 8100);
-const APPROVAL_REQUIRED = process.env.APPROVAL_REQUIRED === 'true';
 const DATABASE_URL = process.env.DATABASE_URL;
 const CORS_ORIGIN = process.env.CORS_ORIGIN;
 
@@ -64,6 +66,7 @@ async function main() {
   let healthCheck: (() => Promise<void>) | undefined;
   let credentials;
   let apiKeyStore;
+  let settingsStore;
 
   if (DATABASE_URL) {
     console.log('Using Postgres persistence');
@@ -76,6 +79,7 @@ async function main() {
     audit = auditLog;
     credentials = new PostgresCredentialResolver(pool);
     apiKeyStore = new PostgresApiKeyStore(pool);
+    settingsStore = new PostgresSettingsStore(pool);
     healthCheck = async () => {
       const client = await pool.connect();
       try {
@@ -91,9 +95,14 @@ async function main() {
     audit = new InMemoryAuditLog();
     credentials = new InMemoryCredentialResolver();
     apiKeyStore = new InMemoryApiKeyStore();
+    settingsStore = new InMemorySettingsStore();
   }
 
   const apiKeys = new ApiKeyService(apiKeyStore, audit);
+  const settings = new SettingsService(settingsStore, audit);
+  await settings.refresh().catch((err) => {
+    console.warn(`[settings] preload failed, using env/defaults: ${(err as Error).message}`);
+  });
 
   const app = await buildApp({
     auth: {
@@ -120,13 +129,22 @@ async function main() {
       },
     },
     apiKeys,
+    settings,
     registry: { repo, audit },
-    pool: new McpClientPool(createSdkTransport, {
-      maxConnectionsPerServer: Number(process.env.MAX_CONNS_PER_SERVER ?? 20),
-      credentialResolver: credentials,
-    }),
+    pool: new McpClientPool(
+      async (server, authOverride) =>
+        createSdkTransport(server, authOverride, {
+          allowedHosts: settings.getCached<string>('ssrf.allowedHosts'),
+          allowPrivateRanges: settings.getCached<boolean>('ssrf.allowPrivateRanges'),
+        }),
+      {
+        maxConnectionsPerServer: () =>
+          settings.getCached<number>('pool.maxConnsPerServer'),
+        credentialResolver: credentials,
+      },
+    ),
     credentials,
-    approvalRequired: APPROVAL_REQUIRED,
+    approvalRequired: () => settings.getCached<boolean>('registry.approvalRequired'),
     healthCheck,
     corsOrigin: CORS_ORIGIN,
   });

@@ -32,9 +32,23 @@ const pkg = JSON.parse(
   readFileSync(new URL('../../../package.json', import.meta.url), 'utf-8'),
 );
 
+export interface SsrfOptions {
+  /**
+   * Explicit allowlist (comma-separated, *. globs). Falls back to
+   * SSRF_ALLOWED_HOSTS env when omitted.
+   */
+  allowedHosts?: string;
+  /**
+   * Also allow loopback/private/link-local targets. Falls back to
+   * SSRF_ALLOW_PRIVATE_RANGES env. Home-lab only.
+   */
+  allowPrivateRanges?: boolean;
+}
+
 export async function createSdkTransport(
   server: MCPServer,
   authOverride?: AuthConfig,
+  ssrf?: SsrfOptions,
 ): Promise<McpTransport> {
   const client = new Client({
     name: 'optigate',
@@ -54,7 +68,7 @@ export async function createSdkTransport(
     await client.connect(transport);
   } else if (server.connection.url) {
     // SSRF guard: if SSRF_ALLOWED_HOSTS is set, only connect to allowed hosts
-    await assertAllowedUrl(server.connection.url);
+    await assertAllowedUrl(server.connection.url, ssrf);
     const url = new URL(server.connection.url);
     const headers = resolveHeaders(server.connection.customHeaders, server.connection.customHeadersEnvRefs, effectiveAuth);
 
@@ -235,13 +249,22 @@ export function embeddedIPv4(host: string): string | null {
  * egress proxy. Redirects are forced to fail closed via
  * `redirect: 'error'` on the transports.
  */
-export async function assertAllowedUrl(urlString: string): Promise<void> {
+export async function assertAllowedUrl(
+  urlString: string,
+  opts?: SsrfOptions,
+): Promise<void> {
   const url = new URL(urlString);
   // URL keeps IPv6 literals bracketed ([::1]) — strip for checks below
   const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
 
+  const allowPrivate =
+    opts?.allowPrivateRanges
+    ?? ['true', '1', 'yes'].includes(
+      (process.env.SSRF_ALLOW_PRIVATE_RANGES ?? '').toLowerCase(),
+    );
+
   // explicit allowlist — everything else is rejected
-  const allowed = process.env.SSRF_ALLOWED_HOSTS;
+  const allowed = opts?.allowedHosts ?? process.env.SSRF_ALLOWED_HOSTS;
   if (allowed) {
     const patterns = allowed.split(',').map((p) => p.trim().toLowerCase());
     const match = patterns.some((pattern) => {
@@ -255,6 +278,13 @@ export async function assertAllowedUrl(urlString: string): Promise<void> {
         `SSRF blocked: host "${host}" is not in SSRF_ALLOWED_HOSTS`,
       );
     }
+    return;
+  }
+
+  // Private-range opt-out (explicit home-lab escape hatch): skips the
+  // literal/range checks below. Unresolvable hosts still fail closed,
+  // and a configured allowlist above still applies.
+  if (allowPrivate) {
     return;
   }
 

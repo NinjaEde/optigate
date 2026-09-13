@@ -14,7 +14,8 @@ import { createMcpGateway } from './infra/mcp/gateway.js';
 import { ToolIndexReconciler } from './infra/mcp/toolIndexReconciler.js';
 import type { ICredentialResolver } from './infra/mcp/credentialResolver.js';
 import type { ApiKeyService } from './services/apiKeyService.js';
-import { ForbiddenError, NotFoundError } from './services/errors.js';
+import type { SettingsService } from './services/settingsService.js';
+import { ForbiddenError, NotFoundError, ValidationError } from './services/errors.js';
 import type {
   AuthContext,
   MCPServer,
@@ -34,7 +35,10 @@ export interface AppOptions {
   credentials: ICredentialResolver;
   /** Gateway API key management (gateway-only identities). */
   apiKeys: ApiKeyService;
-  approvalRequired: boolean;
+  /** Runtime-tunable operational settings (DB > env > default). */
+  settings: SettingsService;
+  /** Static flag or live lookup (runtime settings). */
+  approvalRequired: boolean | (() => boolean);
   /** Optional health check that runs on every /health call (e.g. DB ping). */
   healthCheck?: () => Promise<void>;
   /** Comma-separated allowed CORS origins (default: *). */
@@ -132,6 +136,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 
   const toolsByServer = new Map<string, ToolMeta[]>();
 
+  const settings = options.settings;
   const toolIndexReconciler = new ToolIndexReconciler(
     {
       allActiveServers: () => options.registry.repo.allActive(),
@@ -157,8 +162,9 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
         ),
     },
     {
-      retryDelayMs: 5_000,
-      intervalMs: 60_000,
+      retryDelayMs: () => settings.getCached<number>('reconciler.retryDelayMs'),
+      intervalMs: () => settings.getCached<number>('reconciler.intervalMs'),
+      maxStaleCycles: () => settings.getCached<number>('reconciler.maxStaleCycles'),
       log: (msg) => app.log.info(`[tool-index] ${msg}`),
     },
   );
@@ -175,7 +181,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 
   await app.register(rateLimit, {
     global: true,
-    max: 200,
+    // resolved per request so admins can tune it at runtime
+    max: () => settings.getCached<number>('ratelimit.max'),
     timeWindow: '1 minute',
     keyGenerator: (request) => {
       return request.ip;
@@ -558,10 +565,11 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       return all;
     };
 
+    const maxLimit = settings.getCached<number>('search.maxLimit');
     const tools = await registry.searchToolsFor(
       getAuth(request),
       query ?? '',
-      Math.min(limit ?? 5, 20),
+      Math.min(limit ?? settings.getCached<number>('search.defaultLimit'), maxLimit),
       provider,
     );
 
@@ -747,7 +755,10 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
   app.get('/api/audit', async (request) => {
     const auth = getAuth(request);
     return typeof options.registry.audit.recent === 'function'
-      ? options.registry.audit.recent(100, auth.role === 'superadmin' ? undefined : auth.tenantId)
+      ? options.registry.audit.recent(
+          settings.getCached<number>('audit.limit'),
+          auth.role === 'superadmin' ? undefined : auth.tenantId,
+        )
       : [];
   });
 
@@ -816,6 +827,70 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     }
   });
 
+  // ── Runtime settings ────────────────────────────────────────────────
+  //
+  // Operational tuning knobs (DB override > env var > built-in default).
+  // Reading and writing requires admin rights; security-sensitive keys
+  // (ssrf.*, approval) additionally require superadmin (enforced in the
+  // service). Every change is audited as setting.changed.
+
+  app.get('/api/settings', async (request, reply) => {
+    const auth = getAuth(request);
+    if (auth.role !== 'superadmin' && auth.role !== 'admin') {
+      reply.code(403).send({ error: 'Only admins may view settings' });
+      return;
+    }
+    return { settings: await options.settings.list() };
+  });
+
+  app.put(
+    '/api/settings/:key',
+    {
+      schema: {
+        body: {
+          type: 'object',
+          required: ['value'],
+          properties: { value: {} },
+          additionalProperties: false,
+        },
+      },
+    },
+    async (request, reply) => {
+      const { key } = request.params as { key: string };
+      const { value } = request.body as { value: unknown };
+      try {
+        return await options.settings.set(getAuth(request), key, value);
+      } catch (err) {
+        reply
+          .code(
+            err instanceof NotFoundError
+              ? 404
+              : err instanceof ValidationError
+                ? 400
+                : 403,
+          )
+          .send({ error: (err as Error).message });
+      }
+    },
+  );
+
+  app.delete('/api/settings/:key', async (request, reply) => {
+    const { key } = request.params as { key: string };
+    try {
+      return await options.settings.reset(getAuth(request), key);
+    } catch (err) {
+      reply
+        .code(
+          err instanceof NotFoundError
+            ? 404
+            : err instanceof ValidationError
+              ? 400
+              : 403,
+        )
+        .send({ error: (err as Error).message });
+    }
+  });
+
   // ── MCP facade (/mcp): the registry itself as an MCP server ───────────
   //
   // Exposes exactly two meta tools (search_tools, execute_tool) over
@@ -840,6 +915,9 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 
   const gateway = createMcpGateway({
     resolveAuth: (request) => options.auth.resolveAuth(request),
+    dispatchTimeoutMs: () => settings.getCached<number>('gateway.dispatchTimeoutMs'),
+    searchDefaultLimit: () => settings.getCached<number>('search.defaultLimit'),
+    searchMaxLimit: () => settings.getCached<number>('search.maxLimit'),
     listVisibleServers: (auth) => registry.listServersFor(auth),
     buildToolIndex: buildGatewayToolIndex,
     searchTools: async (tools, query, limit) => {
