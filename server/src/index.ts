@@ -28,7 +28,9 @@ async function resolveAuth(request: { headers: Record<string, unknown> }) {
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
 
   if (process.env.AUTH_MODE !== 'dev' && token) {
-    const user = await verifyKeycloakToken(token);
+    const user = await verifyKeycloakToken(token, (msg) =>
+      console.warn(`[auth] ${msg}`),
+    );
     if (user) {
       return user;
     }

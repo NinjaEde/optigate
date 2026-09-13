@@ -154,6 +154,38 @@ describe('REST API', () => {
     expect(list.json()).toHaveLength(0);
   });
 
+  it('masks static customHeaders values in responses', async () => {
+    const reg = await app.inject({
+      method: 'POST',
+      url: '/api/servers',
+      payload: {
+        name: 'headered',
+        description: '',
+        scope: 'tenant',
+        transport: 'streamable_http',
+        connection: {
+          url: 'https://h.example.com',
+          customHeaders: { 'X-Tenant': 's3cr3t', 'X-Plain': 'visible?' },
+        },
+      },
+      headers: { 'x-test-user': 'admin' },
+    });
+    expect(reg.statusCode).toBe(201);
+    expect(reg.json().connection.customHeaders).toEqual({
+      'X-Tenant': '__stored__',
+      'X-Plain': '__stored__',
+    });
+
+    const list = await app.inject({
+      method: 'GET',
+      url: '/api/servers',
+      headers: { 'x-test-user': 'user' },
+    });
+    expect(list.json()[0].connection.customHeaders['X-Tenant']).toBe(
+      '__stored__',
+    );
+  });
+
   it('writes audit events for lifecycle actions', async () => {
     await app.inject({
       method: 'POST',

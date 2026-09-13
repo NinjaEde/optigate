@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Search, Loader2, Wrench } from 'lucide-react';
 
 import { api, type ToolMeta } from '../api';
@@ -23,6 +23,8 @@ export function ToolSearchView() {
   const [results, setResults] = useState<SearchResult[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // monotonically increasing id: only the latest request may settle state
+  const requestId = useRef(0);
 
   async function run(event: React.FormEvent) {
     event.preventDefault();
@@ -31,16 +33,24 @@ export function ToolSearchView() {
       return;
     }
 
+    const id = ++requestId.current;
+    const apply = (fn: () => void) => {
+      if (requestId.current === id) {
+        fn();
+      }
+    };
+
     setBusy(true);
     setError(null);
+    setResults(null);
 
     try {
       const { tools } = await api.searchTools(q, LIMIT);
-      setResults(tools);
+      apply(() => setResults(tools));
     } catch (err) {
-      setError((err as Error).message);
+      apply(() => setError((err as Error).message));
     } finally {
-      setBusy(false);
+      apply(() => setBusy(false));
     }
   }
 
@@ -108,7 +118,7 @@ export function ToolSearchView() {
                 <span
                   className="mt-0.5 inline-flex min-w-[2.5rem] shrink-0 justify-center rounded-md
                              bg-action/15 px-1.5 py-1 font-mono text-xs font-semibold text-indigo-300"
-                  title="Relevanz-Score"
+                  title={t.toolSearch.scoreTitle}
                 >
                   {r.score}
                 </span>

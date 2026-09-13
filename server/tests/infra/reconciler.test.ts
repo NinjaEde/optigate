@@ -161,6 +161,94 @@ describe('ToolIndexReconciler', () => {
     expect(healthyCall!.detail).toBe('reconnected');
   });
 
+  it('survives markStatus bookkeeping failures (e.g. DB blip)', async () => {
+    const deps = makeDeps([makeServer('s1')], false);
+    deps.markStatus = vi.fn().mockRejectedValue(new Error('db down'));
+    // note: the class reads its logger from options, not deps
+    const logged: string[] = [];
+    const reconciler = new ToolIndexReconciler(deps, {
+      retryDelayMs: 1,
+      log: (msg: string) => logged.push(msg),
+    });
+
+    // must resolve (not throw / crash on unhandled rejection) and log
+    await reconciler.reconcileNow();
+    await reconciler.reconcileNow();
+    expect(logged.some((m) => m.includes('markStatus failed'))).toBe(true);
+  });
+
+  it('coalesces concurrent reconcileNow calls instead of dropping them', async () => {
+    let runs = 0;
+    const deps = makeDeps([makeServer('s1')]);
+    const gated = { release: () => undefined as void };
+    const gate = new Promise<void>((resolve) => {
+      gated.release = resolve;
+    });
+    deps.syncTools = vi.fn().mockImplementation(async () => {
+      runs++;
+      if (runs === 1) {
+        await gate;
+      }
+      return [makeTool('tool-a')];
+    });
+    const reconciler = new ToolIndexReconciler(deps, { retryDelayMs: 1 });
+
+    const first = reconciler.reconcileNow();
+    // arrives while the first pass is gated → must trigger a second pass
+    const second = reconciler.reconcileNow();
+    gated.release();
+    await Promise.all([first, second]);
+
+    expect(runs).toBe(2);
+    expect(index.get('s1')?.map((t) => t.name)).toEqual(['tool-a']);
+  });
+
+  it('drops stale tools after maxStaleCycles', async () => {
+    const deps = makeDeps([makeServer('s1')], false);
+    const logged: string[] = [];
+    const reconciler = new ToolIndexReconciler(deps, {
+      retryDelayMs: 1,
+      maxStaleCycles: 1,
+      log: (msg: string) => logged.push(msg),
+    });
+    const seed = new Map([['s1', [makeTool('tool-c')]]]);
+    (reconciler as unknown as { index: Map<string, ToolMeta[]> }).index = seed;
+
+    await reconciler.reconcileNow();
+    expect(index.get('s1')?.map((t) => t.name)).toEqual(['tool-c']);
+
+    await reconciler.reconcileNow();
+    expect(index.has('s1')).toBe(false);
+    expect(logged.some((m) => m.includes('dropping stale tools'))).toBe(true);
+  });
+
+  it('stop() waits for an in-flight pass', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const deps = makeDeps([makeServer('s1')]);
+    deps.syncTools = vi.fn().mockImplementation(async () => {
+      await gate;
+      return [makeTool('tool-a')];
+    });
+    const reconciler = new ToolIndexReconciler(deps, { retryDelayMs: 1 });
+
+    const run = reconciler.reconcileNow();
+    const stopped = reconciler.stop().then(() => 'stopped');
+    // stop must not resolve while the pass is gated
+    const early = await Promise.race([
+      stopped,
+      Promise.resolve('still-running'),
+    ]);
+    expect(early).toBe('still-running');
+
+    release();
+    await run;
+    expect(await stopped).toBe('stopped');
+    expect(index.get('s1')?.map((t) => t.name)).toEqual(['tool-a']);
+  });
+
   it('provides snapshot of current index', () => {
     const deps = makeDeps([]);
     const reconciler = new ToolIndexReconciler(deps, { retryDelayMs: 1 });
@@ -188,13 +276,18 @@ describe('ToolIndexReconciler', () => {
     reconciler.stop();
   });
 
-  it('reconcileNow is idempotent (reentrant guard)', async () => {
+  it('reconcileNow coalesces concurrent calls into one extra pass', async () => {
     const deps = makeDeps([makeServer('s1')]);
     const reconciler = new ToolIndexReconciler(deps, { retryDelayMs: 1 });
 
-    // start two in parallel — second should return immediately
-    await Promise.all([reconciler.reconcileNow(), reconciler.reconcileNow()]);
+    // start several in parallel — triggers collapse into a single rerun
+    await Promise.all([
+      reconciler.reconcileNow(),
+      reconciler.reconcileNow(),
+      reconciler.reconcileNow(),
+    ]);
 
-    expect(deps.syncTools).toHaveBeenCalledTimes(1); // only one went through
+    // initial pass + exactly one coalesced pass (no lost work, no stampede)
+    expect(deps.syncTools).toHaveBeenCalledTimes(2);
   });
 });

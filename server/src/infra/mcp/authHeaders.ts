@@ -8,15 +8,31 @@ import { decryptSecret } from '../secrets/secretVault.js';
  *   1. secretEnc  — encrypted-at-rest value (AES-256-GCM)
  *   2. secretRef  — environment variable name
  *
+ * Fail-closed: a configured secret that cannot be resolved throws
+ * instead of sending the request unauthenticated. Only profiles
+ * without any secret material resolve to undefined.
+ *
  * Plaintext secrets never leave the backend; API responses only ever
  * contain references or the encrypted payload.
  */
 export function resolveAuthSecret(auth: AuthConfig): string | undefined {
   if (auth.secretEnc) {
-    return decryptSecret(auth.secretEnc) ?? undefined;
+    const decrypted = decryptSecret(auth.secretEnc);
+    if (decrypted === null) {
+      throw new Error(
+        'Cannot decrypt the configured secret — check SECRET_ENCRYPTION_KEY',
+      );
+    }
+    return decrypted;
   }
   if (auth.secretRef) {
-    return process.env[auth.secretRef];
+    const value = process.env[auth.secretRef];
+    if (value === undefined) {
+      throw new Error(
+        `Secret reference "${auth.secretRef}" is not set in the environment`,
+      );
+    }
+    return value;
   }
   return undefined;
 }

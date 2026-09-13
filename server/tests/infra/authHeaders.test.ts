@@ -58,9 +58,14 @@ describe('buildAuthHeaders', () => {
     });
   });
 
-  it('missing secret yields no header (no crash)', () => {
+  it('missing secret fails closed instead of sending unauthenticated', () => {
     const auth: AuthConfig = { type: 'bearer', secretRef: 'NOT_SET' };
-    expect(buildAuthHeaders(auth)).toEqual({});
+    expect(() => buildAuthHeaders(auth)).toThrow(/not set in the environment/);
+  });
+
+  it('undecryptable secret fails closed', () => {
+    const auth: AuthConfig = { type: 'bearer', secretEnc: 'enc:v1:broken' };
+    expect(() => buildAuthHeaders(auth)).toThrow(/decrypt/i);
   });
 
   it('prefers encrypted secret over env reference', () => {
@@ -80,7 +85,7 @@ describe('buildAuthHeaders', () => {
 
   function withKey(fn: () => void) {
     const saved = process.env.SECRET_ENCRYPTION_KEY;
-    process.env.SECRET_ENCRYPTION_KEY = 'k1';
+    process.env.SECRET_ENCRYPTION_KEY = 'k1-0123456789abcdef0123456789abc';
     try {
       fn();
     } finally {

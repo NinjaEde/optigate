@@ -62,14 +62,22 @@ export interface SearchableTool extends ToolMeta {
  * Rank tools for a query and return the top k.
  * Only tools with score > 0 are returned.
  */
+/** Upper bound for a single retrieval response. */
+export const MAX_SEARCH_LIMIT = 50;
+
 export function searchTools(
   tools: SearchableTool[],
   query: string,
   limit: number,
 ): Array<SearchableTool & { score: number }> {
+  if (!query.trim()) {
+    return [];
+  }
+  // clamp: NaN/negative/oversized limits become a sane bounded value
+  const n = Math.min(Math.max(1, Math.floor(limit) || 1), MAX_SEARCH_LIMIT);
   return tools
     .map((tool) => ({ ...tool, score: scoreTool(tool, query) }))
     .filter((t) => t.score > 0)
     .sort((a, b) => b.score - a.score)
-    .slice(0, Math.max(1, limit));
+    .slice(0, n);
 }

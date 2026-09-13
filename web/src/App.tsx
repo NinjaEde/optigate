@@ -17,7 +17,7 @@ import { ServerCard } from './components/ServerCard';
 import { ToolSearchView } from './components/ToolSearchView';
 import { ApiKeysView } from './components/ApiKeysView';
 import { LanguageDropdown } from './components/LanguageDropdown';
-import { LangContext, useT, type Lang } from './i18n';
+import { LangContext, useLang, useT, type Lang } from './i18n';
 
 type View = 'servers' | 'tools' | 'audit' | 'apikeys';
 
@@ -42,7 +42,11 @@ export function App() {
 
 function AppBody({ onSwitchLang }: { onSwitchLang: (lang: Lang) => void }) {
   const t = useT();
-  const lang = (document.documentElement.lang || 'de') as Lang;
+  const lang = useLang();
+  const dateTime = (iso: string) =>
+    new Intl.DateTimeFormat(lang, { dateStyle: 'medium', timeStyle: 'short' }).format(
+      new Date(iso),
+    );
   const [servers, setServers] = useState<MCPServer[]>([]);
   const [toolsByServer, setToolsByServer] = useState<Record<string, ToolMeta[]>>({});
   const [audit, setAudit] = useState<AuditEvent[]>([]);
@@ -73,9 +77,10 @@ function AppBody({ onSwitchLang }: { onSwitchLang: (lang: Lang) => void }) {
     api.whoami().then(setIdentity, () => undefined);
   }, []);
 
-  // Hide key management only once a plain-user role is confirmed —
-  // avoids nav flicker while the identity loads.
-  const mayManageKeys = identity?.role !== 'user';
+  // Fail closed: key management appears only for confirmed admin
+  // identities (briefly hidden for everyone while loading).
+  const mayManageKeys =
+    identity !== null && identity.role !== 'user';
 
   function handleValidated(id: string, tools: ToolMeta[]) {
     setToolsByServer((prev) => ({ ...prev, [id]: tools }));
@@ -247,7 +252,7 @@ function AppBody({ onSwitchLang }: { onSwitchLang: (lang: Lang) => void }) {
 
         {error && (
           <p role="alert" className="mb-6 rounded-lg border border-red-500/25 bg-red-500/10 px-4 py-3 text-sm text-red-400">
-            API-Fehler: {error}
+            {t.app.apiError}: {error}
           </p>
         )}
 
@@ -260,7 +265,12 @@ function AppBody({ onSwitchLang }: { onSwitchLang: (lang: Lang) => void }) {
             tenantLocked={identity !== null && identity.role !== 'superadmin'}
           />
         ) : view === 'audit' ? (
-          <div className="overflow-hidden rounded-xl border border-line bg-panel/80">
+          <div
+            role="region"
+            aria-label={t.app.views.audit}
+            tabIndex={0}
+            className="overflow-x-auto rounded-xl border border-line bg-panel/80"
+          >
             <table className="w-full min-w-[640px] text-left text-sm">
               <thead className="border-b border-line text-xs uppercase tracking-wider text-muted">
                 <tr>
@@ -282,7 +292,7 @@ function AppBody({ onSwitchLang }: { onSwitchLang: (lang: Lang) => void }) {
                 {audit.map((e) => (
                   <tr key={e.id} className="border-b border-line/50 last:border-0 transition hover:bg-white/[0.03]">
                     <td className="whitespace-nowrap px-5 py-3 font-mono text-xs text-muted">
-                      {new Date(e.at).toLocaleTimeString('de-DE')}
+                      {dateTime(e.at)}
                     </td>
                     <td className="px-5 py-3">
                       <span className="rounded-md bg-action/10 px-2 py-0.5 font-mono text-xs text-indigo-300">

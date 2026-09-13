@@ -81,7 +81,7 @@ export function ServerCard({ server: s, tools, onChanged, onEdit, onValidated }:
       if (result.valid) {
         onValidated(s.id, result.tools);
       } else {
-        setValidateError(result.error ?? 'Verbindung fehlgeschlagen');
+        setValidateError(result.error ?? t.card.connectionFailed);
       }
       onChanged();
     } catch (err) {
@@ -144,7 +144,7 @@ export function ServerCard({ server: s, tools, onChanged, onEdit, onValidated }:
           {s.scope}
         </span>
         <span className="rounded-full border border-line bg-white/[0.03] px-2.5 py-1 font-mono text-xs text-muted">
-          {s.transport.replace('_', '-')}
+          {s.transport.replaceAll('_', '-')}
         </span>
         {authLabels[authType] && (
           <span className="inline-flex items-center gap-1 rounded-full border border-line bg-white/[0.03] px-2.5 py-1 text-xs text-muted">
@@ -165,7 +165,7 @@ export function ServerCard({ server: s, tools, onChanged, onEdit, onValidated }:
           </p>
           <ul className="space-y-1">
             {visibleTools.map((tool) => (
-              <li key={tool.name} className="flex items-baseline gap-2 text-xs">
+              <li key={`${s.id}/${tool.name}`} className="flex items-baseline gap-2 text-xs">
                 <code className="font-mono text-indigo-300">{tool.name}</code>
                 {tool.description && (
                   <span className="truncate text-faint">{tool.description}</span>
@@ -272,8 +272,13 @@ export function ServerCard({ server: s, tools, onChanged, onEdit, onValidated }:
             title={t.card.approve}
             aria-label={`${s.name}: ${t.card.approve}`}
             onClick={async () => {
-              await api.approveServer(s.id);
-              onChanged();
+              setValidateError(null);
+              try {
+                await api.approveServer(s.id);
+                onChanged();
+              } catch (err) {
+                setValidateError((err as Error).message);
+              }
             }}
             className="inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs
                        font-medium text-emerald-400 transition hover:bg-emerald-500/10"
@@ -289,8 +294,13 @@ export function ServerCard({ server: s, tools, onChanged, onEdit, onValidated }:
             title={t.card.disable}
             aria-label={`${s.name}: ${t.card.disable}`}
             onClick={async () => {
-              await api.disableServer(s.id);
-              onChanged();
+              setValidateError(null);
+              try {
+                await api.disableServer(s.id);
+                onChanged();
+              } catch (err) {
+                setValidateError((err as Error).message);
+              }
             }}
             className="rounded-lg p-2 text-faint transition hover:bg-white/[0.06] hover:text-amber-400"
           >
@@ -303,11 +313,16 @@ export function ServerCard({ server: s, tools, onChanged, onEdit, onValidated }:
           title={t.card.delete}
           aria-label={`${s.name}: ${t.card.delete}`}
           onClick={async () => {
-            if (!window.confirm('Server wirklich entfernen?')) {
+            if (!window.confirm(t.card.deleteConfirm)) {
               return;
             }
-            await api.deleteServer(s.id);
-            onChanged();
+            setValidateError(null);
+            try {
+              await api.deleteServer(s.id);
+              onChanged();
+            } catch (err) {
+              setValidateError((err as Error).message);
+            }
           }}
           className="ml-auto rounded-lg p-2 text-faint transition hover:bg-red-500/10 hover:text-red-400"
         >

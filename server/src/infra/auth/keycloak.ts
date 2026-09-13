@@ -30,8 +30,29 @@ function mapRole(roles: string[]): AuthContext['role'] {
   return 'user';
 }
 
-/** Standard RS256/JWKS bearer verification (e.g. Keycloak-issued tokens). */
-export function verifyKeycloakToken(token: string): Promise<AuthContext | null> {
+/** Tenant ids come from the IdP — accept only a safe shape. */
+export function sanitizeTenantId(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const id = value.trim();
+  if (!id || id.length > 200 || !/^[A-Za-z0-9._-]+$/.test(id)) {
+    return null;
+  }
+  return id;
+}
+
+/**
+ * Standard RS256/JWKS bearer verification (e.g. Keycloak-issued tokens).
+ *
+ * Failures resolve to null and are reported via `log` (error name only —
+ * never token material). Set REQUIRE_KNOWN_ROLE=true to additionally
+ * reject tokens carrying none of the superadmin/admin/user roles.
+ */
+export function verifyKeycloakToken(
+  token: string,
+  log: (msg: string) => void = () => undefined,
+): Promise<AuthContext | null> {
   const options: VerifyOptions = {
     audience,
     issuer: `${keycloakUrl}/realms/${realm}`,
@@ -41,6 +62,7 @@ export function verifyKeycloakToken(token: string): Promise<AuthContext | null> 
   return new Promise((resolve) => {
     jwt.verify(token, getKey, options, (err, decoded) => {
       if (err || !decoded) {
+        log(`keycloak verify failed: ${err?.name ?? 'unknown error'}`);
         resolve(null);
         return;
       }
@@ -53,12 +75,21 @@ export function verifyKeycloakToken(token: string): Promise<AuthContext | null> 
 
       const realmRoles = payload.realm_access?.roles ?? [];
       const clientRoles = payload.resource_access?.[audience]?.roles ?? [];
-      const tenantId = payload.organization?.[0] ?? null;
+      const roles = [...realmRoles, ...clientRoles];
+
+      if (
+        process.env.REQUIRE_KNOWN_ROLE === 'true'
+        && !roles.some((r) => r === 'superadmin' || r === 'admin' || r === 'user')
+      ) {
+        log('keycloak verify failed: no recognized role claim');
+        resolve(null);
+        return;
+      }
 
       resolve({
         userId: payload.sub ?? 'unknown',
-        role: mapRole([...realmRoles, ...clientRoles]),
-        tenantId,
+        role: mapRole(roles),
+        tenantId: sanitizeTenantId(payload.organization?.[0]),
       });
     });
   });

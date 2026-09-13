@@ -33,12 +33,13 @@ export function validateArgs(
   }
   const schema = inputSchema as Record<string, unknown>;
 
-  // validate required properties exist
+  // validate required properties exist (own properties only — the
+  // `in` operator would accept prototype members like "toString")
   const required = schema.required;
   if (Array.isArray(required)) {
     for (const field of required) {
       const fieldName = String(field);
-      if (!(fieldName in args)) {
+      if (!Object.hasOwn(args, fieldName)) {
         throw new Error(
           `Tool "${toolName}": missing required argument "${fieldName}"`,
         );
@@ -110,6 +111,9 @@ interface PooledConnection {
 
 export class McpClientPool {
   private readonly connections = new Map<string, PooledConnection>();
+  /** In-flight connection attempts by key: concurrent first-use callers
+   * share one attempt instead of each spawning (and leaking) a connection. */
+  private readonly pending = new Map<string, Promise<PooledConnection>>();
   private readonly toolCache = new Map<string, ToolMeta[]>();
   private readonly maxConnectionsPerServer: number;
   private readonly credentialResolver?: ICredentialResolver;
@@ -123,13 +127,14 @@ export class McpClientPool {
   }
 
   async syncTools(server: MCPServer, ctx: AuthContext): Promise<ToolMeta[]> {
+    const key = connKey(server.id, ctx);
     const { transport } = await this.getPooled(server, ctx);
 
     let raw: Awaited<ReturnType<McpTransport['listTools']>>;
     try {
       raw = await transport.listTools();
     } catch (err) {
-      this.connections.delete(connKey(server.id, ctx));
+      await this.dropConnection(key);
       throw new Error(
         `Tool listing failed for "${server.name}": ${(err as Error).message}`,
       );
@@ -144,12 +149,17 @@ export class McpClientPool {
       lastSeenAt: now,
     }));
 
-    this.toolCache.set(server.id, tools);
+    // scoped per credential scope: tenants may legitimately see
+    // different schemas for the same server
+    this.toolCache.set(key, tools);
     return tools;
   }
 
-  cachedTools(serverId: string): ToolMeta[] {
-    return this.toolCache.get(serverId) ?? [];
+  cachedTools(
+    serverId: string,
+    ctx: Pick<AuthContext, 'tenantId'>,
+  ): ToolMeta[] {
+    return this.toolCache.get(connKey(serverId, ctx)) ?? [];
   }
 
   async callTool(
@@ -158,8 +168,9 @@ export class McpClientPool {
     toolName: string,
     args: Record<string, unknown>,
   ): Promise<unknown> {
-    // validate args against the cached tool schema before forwarding
-    const cached = this.toolCache.get(server.id);
+    const key = connKey(server.id, ctx);
+    // validate args against the caller-scoped cached schema before forwarding
+    const cached = this.toolCache.get(key);
     if (cached) {
       const toolMeta = cached.find((t) => t.name === toolName);
       if (toolMeta) {
@@ -168,7 +179,13 @@ export class McpClientPool {
     }
 
     const { transport } = await this.getPooled(server, ctx);
-    return transport.callTool(toolName, args);
+    try {
+      return await transport.callTool(toolName, args);
+    } catch (err) {
+      // drop broken transports instead of reusing them forever
+      await this.dropConnection(key);
+      throw err;
+    }
   }
 
   async shutdown(): Promise<void> {
@@ -183,25 +200,33 @@ export class McpClientPool {
    * Idempotent; other tenants' connections stay untouched.
    */
   async disconnect(serverId: string, ctx: Pick<AuthContext, 'tenantId'>): Promise<void> {
-    const key = connKey(serverId, ctx);
-    const conn = this.connections.get(key);
-    if (conn) {
-      await conn.transport.close().catch(() => undefined);
-      this.connections.delete(key);
-    }
-    this.toolCache.delete(serverId);
+    // scoped: other tenants' connections and caches stay untouched
+    await this.dropConnection(connKey(serverId, ctx));
   }
 
   /** Admin action: closes every tenant connection of this server. */
   async disconnectAll(serverId: string): Promise<void> {
     const prefix = `${serverId}::`;
-    for (const [key, conn] of this.connections.entries()) {
+    for (const [key] of this.connections.entries()) {
       if (key.startsWith(prefix)) {
-        await conn.transport.close().catch(() => undefined);
-        this.connections.delete(key);
+        await this.dropConnection(key);
       }
     }
-    this.toolCache.delete(serverId);
+    for (const key of this.toolCache.keys()) {
+      if (key.startsWith(prefix)) {
+        this.toolCache.delete(key);
+      }
+    }
+  }
+
+  /** Closes, untracks and un-caches one pooled connection. Idempotent. */
+  private async dropConnection(key: string): Promise<void> {
+    const conn = this.connections.get(key);
+    if (conn) {
+      await conn.transport.close().catch(() => undefined);
+      this.connections.delete(key);
+    }
+    this.toolCache.delete(key);
   }
 
   private async getPooled(
@@ -216,6 +241,27 @@ export class McpClientPool {
       return existing;
     }
 
+    // join an in-flight attempt for the same key instead of spawning
+    // a duplicate (the loser would leak: never tracked, never closed)
+    const inFlight = this.pending.get(key);
+    if (inFlight) {
+      return inFlight;
+    }
+
+    const attempt = this.establish(server, ctx, key);
+    this.pending.set(key, attempt);
+    try {
+      return await attempt;
+    } finally {
+      this.pending.delete(key);
+    }
+  }
+
+  private async establish(
+    server: MCPServer,
+    ctx: AuthContext,
+    key: string,
+  ): Promise<PooledConnection> {
     // enforce per-server limit before spawning a new connection
     this.evictIfNeeded(server.id);
 
@@ -226,7 +272,13 @@ export class McpClientPool {
     }
 
     const transport = await this.factory(server, authOverride);
-    await transport.connect();
+    try {
+      await transport.connect();
+    } catch (err) {
+      // never pool a half-open transport
+      await transport.close().catch(() => undefined);
+      throw err;
+    }
 
     const pooled: PooledConnection = { transport, lastUsedAt: this.now() };
     this.connections.set(key, pooled);

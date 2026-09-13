@@ -10,7 +10,7 @@ import {
 } from 'lucide-react';
 
 import { api, type ApiKey, type ApiKeyRole } from '../api';
-import { useT } from '../i18n';
+import { useLang, useT } from '../i18n';
 
 /** Display prefix: normalizes og_og_… rows stored before the prefix fix. */
 function displayPrefix(key: ApiKey): string {
@@ -41,7 +41,13 @@ export function ApiKeysView({
   /** Non-superadmins can only create keys for their own tenant. */
   tenantLocked?: boolean;
 }) {
-  const t = useT().apikeys;
+  const fullT = useT();
+  const t = fullT.apikeys;
+  const lang = useLang();
+  const dateTime = (iso: string) =>
+    new Intl.DateTimeFormat(lang, { dateStyle: 'medium', timeStyle: 'short' }).format(
+      new Date(iso),
+    );
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -50,6 +56,16 @@ export function ApiKeysView({
   const [copied, setCopied] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const panelRef = useRef<HTMLFormElement>(null) as RefObject<HTMLFormElement>;
+  const copyTimer = useRef<number | null>(null);
+
+  // pending copy-feedback timer must not fire after unmount
+  useEffect(() => {
+    return () => {
+      if (copyTimer.current !== null) {
+        window.clearTimeout(copyTimer.current);
+      }
+    };
+  }, []);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -107,7 +123,10 @@ export function ApiKeysView({
     try {
       await navigator.clipboard.writeText(createdSecret);
       setCopied(true);
-      window.setTimeout(() => setCopied(false), 2000);
+      if (copyTimer.current !== null) {
+        window.clearTimeout(copyTimer.current);
+      }
+      copyTimer.current = window.setTimeout(() => setCopied(false), 2000);
     } catch {
       // Clipboard-API unverfügbar (z. B. unsicherer Kontext) → manuell kopieren
       setCopied(false);
@@ -169,7 +188,12 @@ export function ApiKeysView({
         </div>
       )}
 
-      <div className="overflow-hidden rounded-xl border border-line bg-panel/80">
+      <div
+        role="region"
+        aria-label={fullT.app.views.apikeys}
+        tabIndex={0}
+        className="overflow-x-auto rounded-xl border border-line bg-panel/80"
+      >
         <table className="w-full min-w-[720px] text-left text-sm">
           <thead className="border-b border-line text-xs uppercase tracking-wider text-muted">
             <tr>
@@ -207,7 +231,7 @@ export function ApiKeysView({
                   <td className="px-5 py-3 text-muted">{k.role}</td>
                   <td className="px-5 py-3 text-muted">{k.tenantId ?? '—'}</td>
                   <td className="whitespace-nowrap px-5 py-3 font-mono text-xs text-muted">
-                    {new Date(k.createdAt).toLocaleDateString()}
+                    {dateTime(k.createdAt)}
                   </td>
                   <td className="px-5 py-3 text-right">
                     {status === 'active' && (
@@ -298,8 +322,8 @@ function CreateDialog({
       });
       onCreated(res.secret);
     } catch (err) {
+      // keep the dialog open so the entered values survive the failure
       onError((err as Error).message);
-      onClose();
     } finally {
       setBusy(false);
     }

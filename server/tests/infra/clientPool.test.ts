@@ -96,6 +96,120 @@ describe('McpClientPool — tenant-scoped connections', () => {
     expect(factoryInfo.transports).toHaveLength(1);
   });
 
+  it('concurrent first-use callers share one connection attempt', async () => {
+    const results = await Promise.all([
+      pool.callTool(server, ctx('acme'), 't', {}),
+      pool.callTool(server, ctx('acme'), 't', {}),
+      pool.callTool(server, ctx('acme'), 't', {}),
+    ]);
+
+    expect(results).toHaveLength(3);
+    // a single transport spawned — no leaked duplicates
+    expect(factoryInfo.transports).toHaveLength(1);
+    expect(factoryInfo.factory).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes half-open transports when connect fails', async () => {
+    const created: MockTransport[] = [];
+    const failing = vi.fn(async (): Promise<MockTransport> => {
+      const t: MockTransport = {
+        connectCount: 0,
+        closed: false,
+        async connect() {
+          throw new Error('refused');
+        },
+        async close() {
+          t.closed = true;
+        },
+        async listTools() {
+          return [];
+        },
+        async callTool() {
+          return {};
+        },
+      };
+      created.push(t);
+      return t;
+    });
+    const failingPool = new McpClientPool(failing);
+    await expect(
+      failingPool.callTool(server, ctx('acme'), 't', {}),
+    ).rejects.toThrow(/refused/);
+    expect(created).toHaveLength(1);
+    expect(created[0].closed).toBe(true);
+  });
+
+  it('scopes the tool cache per tenant instead of sharing it', async () => {
+    let n = 0;
+    const scoped = vi.fn(async (): Promise<MockTransport> => {
+      n++;
+      const tag = `tool-${n}`;
+      const t: MockTransport = {
+        connectCount: 0,
+        closed: false,
+        async connect() {},
+        async close() {
+          t.closed = true;
+        },
+        async listTools() {
+          return [{ name: tag }];
+        },
+        async callTool() {
+          return {};
+        },
+      };
+      return t;
+    });
+    const scopedPool = new McpClientPool(scoped);
+
+    await scopedPool.syncTools(server, ctx('acme'));
+    await scopedPool.syncTools(server, ctx('globex'));
+
+    expect(scopedPool.cachedTools(server.id, ctx('acme')).map((t) => t.name)).toEqual([
+      'tool-1',
+    ]);
+    expect(scopedPool.cachedTools(server.id, ctx('globex')).map((t) => t.name)).toEqual([
+      'tool-2',
+    ]);
+
+    // disconnecting one tenant leaves the other's cache intact
+    await scopedPool.disconnect(server.id, ctx('acme'));
+    expect(scopedPool.cachedTools(server.id, ctx('acme'))).toEqual([]);
+    expect(scopedPool.cachedTools(server.id, ctx('globex')).map((t) => t.name)).toEqual([
+      'tool-2',
+    ]);
+  });
+
+  it('evicts broken transports on callTool failure', async () => {
+    const failing = vi.fn(async (): Promise<MockTransport> => {
+      const t: MockTransport = {
+        connectCount: 0,
+        closed: false,
+        async connect() {},
+        async close() {
+          t.closed = true;
+        },
+        async listTools() {
+          return [];
+        },
+        async callTool() {
+          throw new Error('boom');
+        },
+      };
+      return t;
+    });
+    const failingPool = new McpClientPool(failing);
+
+    await expect(
+      failingPool.callTool(server, ctx('acme'), 't', {}),
+    ).rejects.toThrow(/boom/);
+    // next call must not reuse the broken transport
+    await expect(
+      failingPool.callTool(server, ctx('acme'), 't', {}),
+    ).rejects.toThrow(/boom/);
+    expect(failing).toHaveBeenCalledTimes(2);
+  });
+
   describe('maxConnectionsPerServer (LRU eviction)', () => {
     it('evicts the least recently used tenant connection beyond the limit', async () => {
       const limited = new McpClientPool(factoryInfo.factory, {
@@ -161,6 +275,16 @@ describe('validateArgs', () => {
         properties: { name: { type: 'string' }, count: { type: 'integer' } },
       }),
     ).toThrow(/missing required argument "name"/);
+  });
+
+  it('rejects prototype members as required fields', () => {
+    // 'toString' in {} is true via the prototype chain — must not pass
+    expect(() =>
+      validateArgs('my-tool', {}, {
+        type: 'object',
+        required: ['toString'],
+      }),
+    ).toThrow(/missing required argument "toString"/);
   });
 
   it('rejects wrong types', () => {

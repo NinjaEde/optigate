@@ -29,6 +29,11 @@ export interface ToolIndexReconcilerOptions {
    * Default 0.2 (so the actual interval varies ±20% around intervalMs).
    */
   jitter?: number;
+  /**
+   * How many consecutive cycles an unreachable server's stale tools are
+   * kept before being dropped from the index. Default 10.
+   */
+  maxStaleCycles?: number;
   /** Logger for diagnostics. */
   log?: (msg: string) => void;
 }
@@ -36,6 +41,7 @@ export interface ToolIndexReconcilerOptions {
 const DEFAULT_RETRY_DELAY_MS = 5_000;
 const DEFAULT_INTERVAL_MS = 60_000;
 const DEFAULT_JITTER = 0.2;
+const DEFAULT_MAX_STALE_CYCLES = 10;
 
 /**
  * Keeps the global tool index continuously up to date:
@@ -54,12 +60,17 @@ export class ToolIndexReconciler {
   private index = new Map<string, ToolMeta[]>();
   private timer: NodeJS.Timeout | null = null;
   private running = false;
+  /** Ad-hoc reconcileNow() while running → one coalesced extra pass. */
+  private pending = false;
   private readonly retryDelayMs: number;
   private readonly intervalMs: number;
   private readonly jitter: number;
+  private readonly maxStaleCycles: number;
   private readonly log: (msg: string) => void;
   /** Track consecutive failures per server to set degraded status. */
   private readonly consecutiveFailures = new Map<string, number>();
+  /** Track how long stale tool copies are kept per server. */
+  private readonly staleCycles = new Map<string, number>();
 
   constructor(
     private readonly deps: ReconcilerDeps,
@@ -68,11 +79,35 @@ export class ToolIndexReconciler {
     this.retryDelayMs = options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
     this.intervalMs = options.intervalMs ?? DEFAULT_INTERVAL_MS;
     this.jitter = options.jitter ?? DEFAULT_JITTER;
+    this.maxStaleCycles = options.maxStaleCycles ?? DEFAULT_MAX_STALE_CYCLES;
     this.log = options.log ?? (() => undefined);
   }
 
+  /** Defensive copy — consumers must not mutate the live index. */
   snapshot(): Map<string, ToolMeta[]> {
-    return this.index;
+    return new Map(
+      [...this.index.entries()].map(([id, tools]) => [id, [...tools]]),
+    );
+  }
+
+  /**
+   * Builds/refreshes the index. Calls arriving while a pass is running
+   * are coalesced into a single extra pass instead of being dropped.
+   */
+  async reconcileNow(): Promise<void> {
+    if (this.running) {
+      this.pending = true;
+      return;
+    }
+    this.running = true;
+    try {
+      do {
+        this.pending = false;
+        await this.reconcileOnce();
+      } while (this.pending);
+    } finally {
+      this.running = false;
+    }
   }
 
   /**
@@ -80,77 +115,101 @@ export class ToolIndexReconciler {
    * three attempts; unreachable ones keep their last known tools (stale
    * data is better than none) unless they were never reachable.
    */
-  async reconcileNow(): Promise<void> {
-    if (this.running) {
-      return;
-    }
-    this.running = true;
+  private async reconcileOnce(): Promise<void> {
+    const servers = await this.deps.allActiveServers();
+    const nextIndex = new Map<string, ToolMeta[]>();
+    const seen = new Set<string>();
 
-    try {
-      const servers = await this.deps.allActiveServers();
-      const nextIndex = new Map<string, ToolMeta[]>();
+    for (const server of servers) {
+      seen.add(server.id);
+      const previous = this.index.get(server.id);
 
-      for (const server of servers) {
-        const previous = this.index.get(server.id);
+      // deleted / disabled / pending → drop from index entirely
+      if (server.status !== 'healthy' && server.status !== 'degraded') {
+        continue;
+      }
 
-        // deleted / disabled / pending → drop from index entirely
-        if (server.status !== 'healthy' && server.status !== 'degraded') {
-          continue;
+      let tools: ToolMeta[] | null = null;
+      let succeeded = false;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          tools = await this.deps.syncTools(server);
+          succeeded = true;
+          break;
+        } catch (err) {
+          this.log(
+            `tool sync failed for "${server.name}" `
+            + `(attempt ${attempt}/3): ${(err as Error).message}`,
+          );
+          if (attempt < 3) {
+            await delay(this.retryDelayMs);
+          }
         }
+      }
 
-        let tools: ToolMeta[] | null = null;
-        let succeeded = false;
-        for (let attempt = 1; attempt <= 3; attempt++) {
-          try {
-            tools = await this.deps.syncTools(server);
-            succeeded = true;
-            break;
-          } catch (err) {
-            this.log(
-              `tool sync failed for "${server.name}" `
-              + `(attempt ${attempt}/3): ${(err as Error).message}`,
+      if (succeeded) {
+        // had consecutive failures before → restore to healthy
+        const hadFailures = this.consecutiveFailures.delete(server.id);
+        this.staleCycles.delete(server.id);
+        if (hadFailures && this.deps.markStatus) {
+          // never crash the loop on bookkeeping failures (e.g. DB blip)
+          await this.deps
+            .markStatus(server.id, 'healthy', 'reconnected')
+            .catch((err: Error) =>
+              this.log(`markStatus failed: ${err.message}`),
             );
-            if (attempt < 3) {
-              await delay(this.retryDelayMs);
-            }
-          }
         }
+      } else {
+        // increment consecutive failure counter
+        const failures = (this.consecutiveFailures.get(server.id) ?? 0) + 1;
+        this.consecutiveFailures.set(server.id, failures);
 
-        if (succeeded) {
-          // had consecutive failures before → restore to healthy
-          const hadFailures = this.consecutiveFailures.delete(server.id);
-          if (hadFailures && this.deps.markStatus) {
-            void this.deps.markStatus(server.id, 'healthy', 'reconnected');
-          }
-        } else {
-          // increment consecutive failure counter
-          const failures = (this.consecutiveFailures.get(server.id) ?? 0) + 1;
-          this.consecutiveFailures.set(server.id, failures);
-
-          // after 2 consecutive failures → set degraded
-          if (failures >= 2 && this.deps.markStatus) {
-            void this.deps.markStatus(server.id, 'degraded', `${failures} consecutive sync failures`);
-          }
+        // after 2 consecutive failures → set degraded
+        if (failures >= 2 && this.deps.markStatus) {
+          await this.deps
+            .markStatus(server.id, 'degraded', `${failures} consecutive sync failures`)
+            .catch((err: Error) =>
+              this.log(`markStatus failed: ${err.message}`),
+            );
         }
+      }
 
-        if (tools && tools.length > 0) {
-          nextIndex.set(server.id, tools);
-        } else if (tools === null && previous) {
-          // unreachable but previously indexed → keep stale copy
+      if (tools && tools.length > 0) {
+        nextIndex.set(server.id, tools);
+      } else if (tools === null && previous) {
+        // unreachable but previously indexed → keep a bounded stale copy
+        const stale = (this.staleCycles.get(server.id) ?? 0) + 1;
+        if (stale <= this.maxStaleCycles) {
+          this.staleCycles.set(server.id, stale);
           nextIndex.set(server.id, previous);
+        } else {
+          this.staleCycles.delete(server.id);
+          this.log(
+            `dropping stale tools for "${server.name}" after ${stale} cycles`,
+          );
         }
-        // tools === [] (server reachable, genuinely no tools) → drop
       }
+      // tools === [] (server reachable, genuinely no tools) → drop
+    }
 
-      const sizeBefore = this.index.size;
-      this.index = nextIndex;
-      this.deps.onIndexUpdated?.(this.index);
-
-      if (nextIndex.size !== sizeBefore) {
-        this.log(`tool index updated: ${nextIndex.size} server(s) indexed`);
+    // prune bookkeeping for servers gone from the registry
+    for (const id of [...this.consecutiveFailures.keys()]) {
+      if (!seen.has(id)) {
+        this.consecutiveFailures.delete(id);
       }
-    } finally {
-      this.running = false;
+    }
+    for (const id of [...this.staleCycles.keys()]) {
+      if (!seen.has(id)) {
+        this.staleCycles.delete(id);
+      }
+    }
+
+    const sizeBefore = this.index.size;
+    this.index = nextIndex;
+    this.deps.onIndexUpdated?.(this.snapshot());
+
+    if (nextIndex.size !== sizeBefore) {
+      this.log(`tool index updated: ${nextIndex.size} server(s) indexed`);
     }
   }
 
@@ -180,10 +239,17 @@ export class ToolIndexReconciler {
     scheduleNext();
   }
 
-  stop(): void {
+  /**
+   * Stops the background loop and waits for an in-flight pass, so
+   * shutdown never strands halfway-synced state.
+   */
+  async stop(): Promise<void> {
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
+    }
+    while (this.running) {
+      await delay(25);
     }
   }
 }

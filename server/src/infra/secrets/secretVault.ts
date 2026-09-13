@@ -12,9 +12,12 @@ const ALGORITHM = 'aes-256-gcm';
 let cachedKey: Buffer | null = null;
 let cachedKeyRaw: string | null = null;
 
+/** Minimum key material: short passphrases are trivially brute-forced. */
+export const MIN_KEY_LENGTH = 32;
+
 function getKey(): Buffer | null {
   const raw = process.env.SECRET_ENCRYPTION_KEY;
-  if (!raw) {
+  if (!raw || raw.length < MIN_KEY_LENGTH) {
     return null;
   }
   if (!cachedKey || cachedKeyRaw !== raw) {

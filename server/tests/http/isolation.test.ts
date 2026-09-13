@@ -38,7 +38,7 @@ describe('Multi-tenant credential isolation', () => {
   let app: Awaited<ReturnType<typeof makeApp>>;
 
   beforeEach(async () => {
-    process.env.SECRET_ENCRYPTION_KEY = 'test-encryption-key-32-chars!!';
+    process.env.SECRET_ENCRYPTION_KEY = 'test-encryption-key-32-chars!!!!';
     app = await makeApp();
   });
 
@@ -60,7 +60,73 @@ describe('Multi-tenant credential isolation', () => {
     expect(res.json().error).toContain('superadmin');
   });
 
-  it('rejects shared stdio servers even for superadmins', async () => {
+    it('rejects stdio servers for non-superadmins (process spawning)', async () => {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/servers',
+        headers: { 'x-test-user': 'u1', 'x-test-role': 'admin', 'x-test-tenant': 't1' },
+        payload: {
+          name: 'evil-stdio',
+          description: '',
+          scope: 'tenant',
+          transport: 'stdio',
+          connection: { command: 'sh', args: ['-c', 'id'] },
+        },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toContain('superadmin');
+    });
+
+    it('allows stdio servers for superadmins but locks reconfiguration', async () => {
+      const reg = await app.inject({
+        method: 'POST',
+        url: '/api/servers',
+        headers: { 'x-test-user': 'u0', 'x-test-role': 'superadmin' },
+        payload: {
+          name: 'local-tool',
+          description: '',
+          scope: 'private',
+          transport: 'stdio',
+          connection: { command: 'node', args: ['server.js'] },
+        },
+      });
+      expect(reg.statusCode).toBe(201);
+      const id = reg.json().id as string;
+
+      // tenant admin may neither switch transports to stdio ...
+      const httpReg = await app.inject({
+        method: 'POST',
+        url: '/api/servers',
+        headers: { 'x-test-user': 'u1', 'x-test-role': 'admin', 'x-test-tenant': 't1' },
+        payload: {
+          name: 'plain-http',
+          description: '',
+          scope: 'tenant',
+          transport: 'streamable_http',
+          connection: { url: 'https://h.example.com' },
+        },
+      });
+      const httpId = httpReg.json().id as string;
+      const escalate = await app.inject({
+        method: 'PATCH',
+        url: `/api/servers/${httpId}`,
+        headers: { 'x-test-user': 'u1', 'x-test-role': 'admin', 'x-test-tenant': 't1' },
+        payload: { transport: 'stdio', connection: { command: 'sh' } },
+      });
+      expect(escalate.statusCode).toBe(403);
+
+      // ... but metadata edits on other servers still work
+      const meta = await app.inject({
+        method: 'PATCH',
+        url: `/api/servers/${httpId}`,
+        headers: { 'x-test-user': 'u1', 'x-test-role': 'admin', 'x-test-tenant': 't1' },
+        payload: { description: 'still fine' },
+      });
+      expect(meta.statusCode).toBe(200);
+      void id;
+    });
+
+    it('rejects shared stdio servers even for superadmins', async () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/servers',
@@ -174,7 +240,7 @@ describe('Multi-tenant credential isolation', () => {
     });
 
     it('hides other tenants bindings from admins', async () => {
-      process.env.SECRET_ENCRYPTION_KEY = 'test-encryption-key-32-chars!!';
+      process.env.SECRET_ENCRYPTION_KEY = 'test-encryption-key-32-chars!!!!';
       await app.inject({
         method: 'PUT',
         url: `/api/servers/${serverId}/bindings/t2`,

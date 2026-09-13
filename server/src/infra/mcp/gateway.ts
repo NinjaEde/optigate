@@ -227,9 +227,13 @@ export function createMcpGateway(options: GatewayOptions) {
         body: jsonRpcError(body.id ?? null, -32000, (err as Error).message),
       };
     } finally {
-      void mcpServer.close();
-      void serverTransport.close();
-      void clientTransport.close();
+      // allSettled: a failing close must not mask the real result or
+      // surface as an unhandled rejection
+      await Promise.allSettled([
+        mcpServer.close(),
+        serverTransport.close(),
+        clientTransport.close(),
+      ]);
     }
   }
 

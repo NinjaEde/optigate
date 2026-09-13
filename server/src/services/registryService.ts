@@ -63,6 +63,7 @@ export class RegistryService {
     }
 
     this.assertConnectionValid(input.transport, input.connection);
+    this.assertStdioAllowed(auth, input.transport, true);
 
     const shared = this.assertShared(auth, input.shared ?? false, input.transport);
 
@@ -244,7 +245,11 @@ export class RegistryService {
     }
 
     if (patch.transport !== undefined) {
+      this.assertStdioAllowed(auth, patch.transport, server.transport !== 'stdio');
       server.transport = patch.transport;
+    } else if (server.transport === 'stdio' && patch.connection !== undefined) {
+      // Reconfiguring the spawned process of an existing stdio server.
+      this.assertStdioAllowed(auth, 'stdio', true);
     }
 
     if (patch.connection !== undefined) {
@@ -252,7 +257,10 @@ export class RegistryService {
         patch.transport ?? server.transport,
         patch.connection,
       );
-      server.connection = patch.connection;
+      server.connection = this.mergeConnection(
+        server.connection,
+        patch.connection,
+      );
     }
 
     // config change invalidates cached connection state
@@ -360,6 +368,55 @@ export class RegistryService {
     return results;
   }
 
+  /**
+   * Merges a connection patch into the stored connection without losing
+   * secrets: clients only ever see the '__stored__' marker, so absent or
+   * marker-carrying fields keep their stored values. Explicitly supplied
+   * secrets/refs replace the stored ones (stale counterparts are dropped
+   * so resolution order stays unambiguous).
+   */
+  private mergeConnection(
+    existing: MCPServer['connection'],
+    patch: MCPServer['connection'],
+  ): MCPServer['connection'] {
+    const merged: MCPServer['connection'] = { ...existing, ...patch };
+
+    if (patch.auth) {
+      const auth = { ...existing.auth, ...patch.auth };
+      if (patch.auth.secretEnc && !patch.auth.secretRef) {
+        delete auth.secretRef;
+      }
+      if (patch.auth.secretRef && !patch.auth.secretEnc) {
+        delete auth.secretEnc;
+      }
+      if (patch.auth.clientSecretEnc && !patch.auth.clientSecretRef) {
+        delete auth.clientSecretRef;
+      }
+      if (patch.auth.clientSecretRef && !patch.auth.clientSecretEnc) {
+        delete auth.clientSecretEnc;
+      }
+      if (patch.auth.type === 'none') {
+        delete auth.secretEnc;
+        delete auth.secretRef;
+        delete auth.clientSecretEnc;
+        delete auth.clientSecretRef;
+      }
+      merged.auth = auth;
+    }
+
+    if (patch.customHeaders && existing.customHeaders) {
+      const headers = { ...patch.customHeaders };
+      for (const [k, v] of Object.entries(headers)) {
+        if (v === '__stored__' && existing.customHeaders[k] !== undefined) {
+          headers[k] = existing.customHeaders[k] as string;
+        }
+      }
+      merged.customHeaders = headers;
+    }
+
+    return merged;
+  }
+
   private assertConnectionValid(
     transport: Transport,
     connection: MCPServer['connection'],
@@ -369,6 +426,23 @@ export class RegistryService {
     }
     if (transport === 'stdio' && !connection.command) {
       throw new Error('stdio transports require a connection.command');
+    }
+  }
+
+  /**
+   * stdio servers spawn OS processes with the server's privileges.
+   * Only superadmins may introduce or reconfigure such processes —
+   * tenant admins are limited to metadata edits on existing ones.
+   */
+  private assertStdioAllowed(
+    auth: AuthContext,
+    transport: Transport,
+    newProcess: boolean,
+  ): void {
+    if (transport === 'stdio' && newProcess && auth.role !== 'superadmin') {
+      throw new ForbiddenError(
+        'Only superadmins may create or reconfigure stdio (process-spawning) servers',
+      );
     }
   }
 

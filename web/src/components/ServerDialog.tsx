@@ -55,10 +55,14 @@ const emptyForm = {
 };
 
 /** Editor rows for connection.customHeaders (key/value, 0..n). */
-type HeaderRow = { key: string; value: string };
+type HeaderRow = { id: string; key: string; value: string };
 
 function rowsFromHeaders(headers: Record<string, string> | undefined): HeaderRow[] {
-  return Object.entries(headers ?? {}).map(([key, value]) => ({ key, value }));
+  return Object.entries(headers ?? {}).map(([key, value]) => ({
+    id: crypto.randomUUID(),
+    key,
+    value,
+  }));
 }
 
 function headersFromRows(rows: HeaderRow[]): Record<string, string> | undefined {
@@ -119,7 +123,16 @@ export function ServerDialog({
     }
   }, [open]);
 
+  // Re-init the form only when the dialog opens or another server is
+  // picked — NOT on every background reload (server is a fresh object
+  // reference each time and would otherwise wipe in-progress edits).
+  const initKey = `${visible}:${server?.id ?? 'new'}`;
+  const lastInit = useRef('');
   useEffect(() => {
+    if (lastInit.current === initKey) {
+      return;
+    }
+    lastInit.current = initKey;
     if (visible && server) {
       setForm({
         ...emptyForm,
@@ -150,7 +163,9 @@ export function ServerDialog({
       setHeaderRows([]);
       setError(null);
     }
-  }, [visible, server]);
+    // initKey derives from visible+server; listing all three keeps the
+    // linter happy while the guard above prevents wipe-on-reload.
+  }, [visible, server, initKey]);
 
   function set<K extends keyof typeof form>(key: K, value: (typeof form)[K]) {
     setForm((f) => ({ ...f, [key]: value }));
@@ -211,6 +226,14 @@ export function ServerDialog({
     event.preventDefault();
     setBusy(true);
     setError(null);
+
+    // duplicate header names would silently collapse via Object.fromEntries
+    const names = headerRows.map((r) => r.key.trim()).filter((n) => n !== '');
+    if (new Set(names).size !== names.length) {
+      setError(t.dialog.duplicateHeader);
+      setBusy(false);
+      return;
+    }
 
     try {
       if (editing && server) {
@@ -403,13 +426,13 @@ export function ServerDialog({
               {headerRows.length > 0 && (
                 <ul className="space-y-2">
                   {headerRows.map((row, index) => (
-                    <li key={index} className="flex items-center gap-2">
+                    <li key={row.id} className="flex items-center gap-2">
                       <input
                         value={row.key}
                         onChange={(e) =>
                           setHeaderRows((rows) =>
-                            rows.map((r, i) =>
-                              i === index ? { ...r, key: e.target.value } : r,
+                            rows.map((r) =>
+                              r.id === row.id ? { ...r, key: e.target.value } : r,
                             ),
                           )
                         }
@@ -424,8 +447,8 @@ export function ServerDialog({
                         value={row.value}
                         onChange={(e) =>
                           setHeaderRows((rows) =>
-                            rows.map((r, i) =>
-                              i === index ? { ...r, value: e.target.value } : r,
+                            rows.map((r) =>
+                              r.id === row.id ? { ...r, value: e.target.value } : r,
                             ),
                           )
                         }
@@ -437,9 +460,9 @@ export function ServerDialog({
                       <button
                         type="button"
                         onClick={() =>
-                          setHeaderRows((rows) => rows.filter((_, i) => i !== index))
+                          setHeaderRows((rows) => rows.filter((r) => r.id !== row.id))
                         }
-                        aria-label={`Header ${row.key || index + 1} entfernen`}
+                        aria-label={t.dialog.removeHeaderOf(row.key || String(index + 1))}
                         className="shrink-0 rounded-lg p-2 text-faint transition
                                    hover:bg-red-500/10 hover:text-red-400"
                       >
@@ -452,7 +475,9 @@ export function ServerDialog({
 
               <button
                 type="button"
-                onClick={() => setHeaderRows((rows) => [...rows, { key: '', value: '' }])}
+                onClick={() =>
+                  setHeaderRows((rows) => [...rows, { id: crypto.randomUUID(), key: '', value: '' }])
+                }
                 className="inline-flex items-center gap-1.5 rounded-lg border border-line px-3 py-2
                            text-xs font-medium text-muted transition hover:border-action/50
                            hover:text-indigo-300"

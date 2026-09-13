@@ -263,12 +263,24 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     return { ...connection, auth: stored };
   }
 
-  /** Strips secret material before any server object leaves the backend. */
+  /**
+   * Strips secret material before any server object leaves the backend.
+   * Static customHeaders values are masked too — they routinely carry
+   * tokens, and every viewer of the server could otherwise read them.
+   * The '__stored__' marker round-trips: updateServer keeps the stored
+   * value for keys still carrying the marker.
+   */
   function toClientResponse(server: MCPServer) {
+    const customHeaders = server.connection.customHeaders
+      ? Object.fromEntries(
+          Object.keys(server.connection.customHeaders).map((k) => [k, '__stored__']),
+        )
+      : undefined;
     return {
       ...server,
       connection: {
         ...server.connection,
+        ...(customHeaders ? { customHeaders } : {}),
         auth: sanitizeAuthForClient(server.connection.auth),
       },
     };
@@ -890,7 +902,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 
   toolIndexReconciler.start();
   app.addHook('onClose', async () => {
-    toolIndexReconciler.stop();
+    await toolIndexReconciler.stop();
     await options.pool.shutdown();
   });
 

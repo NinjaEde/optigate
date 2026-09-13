@@ -21,12 +21,13 @@ const withKey = (key: string | undefined, fn: () => void) => {
 
 describe('secretVault', () => {
   it('reports whether encryption is available', () => {
-    withKey('test-key', () => expect(encryptionEnabled()).toBe(true));
+    withKey('test-key-0123456789abcdef01234567', () => expect(encryptionEnabled()).toBe(true));
+    withKey('short', () => expect(encryptionEnabled()).toBe(false));
     withKey(undefined, () => expect(encryptionEnabled()).toBe(false));
   });
 
   it('round-trips a secret', () => {
-    withKey('k1', () => {
+    withKey('k1-0123456789abcdef0123456789abc', () => {
       const enc = encryptSecret('hunter2');
       expect(enc).not.toBeNull();
       expect(isEncryptedSecret(enc as string)).toBe(true);
@@ -35,7 +36,7 @@ describe('secretVault', () => {
   });
 
   it('produces different ciphertexts for the same plaintext', () => {
-    withKey('k1', () => {
+    withKey('k1-0123456789abcdef0123456789abc', () => {
       const a = encryptSecret('same');
       const b = encryptSecret('same');
       expect(a).not.toBe(b);
@@ -44,10 +45,10 @@ describe('secretVault', () => {
 
   it('cannot decrypt with a different key', () => {
     let stored: string;
-    withKey('key-a', () => {
+    withKey('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', () => {
       stored = encryptSecret('data') as string;
     });
-    withKey('key-b', () => {
+    withKey('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', () => {
       expect(decryptSecret(stored)).toBeNull();
     });
   });

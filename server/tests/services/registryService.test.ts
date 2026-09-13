@@ -154,6 +154,61 @@ describe('RegistryService.manage authorization', () => {
   });
 });
 
+describe('RegistryService.updateServer secret handling', () => {
+  async function seed() {
+    const svc = makeService();
+    const srv = await svc.registerServer(authAdmin, {
+      name: 'vaulted',
+      description: '',
+      scope: 'tenant',
+      transport: 'streamable_http',
+      connection: {
+        url: 'https://v.example.com',
+        auth: { type: 'bearer', secretEnc: 'enc:v1:stored' },
+        customHeaders: { 'X-Tenant': 'real-value' },
+      },
+    });
+    return { svc, srv };
+  }
+
+  it('preserves stored secrets on metadata-only patches', async () => {
+    const { svc, srv } = await seed();
+    const updated = await svc.updateServer(authAdmin, srv.id, {
+      description: 'new text',
+    });
+    expect(updated.connection.auth?.secretEnc).toBe('enc:v1:stored');
+    expect(updated.connection.customHeaders).toEqual({
+      'X-Tenant': 'real-value',
+    });
+  });
+
+  it('replaces secrets explicitly and drops stale counterparts', async () => {
+    const { svc, srv } = await seed();
+    const updated = await svc.updateServer(authAdmin, srv.id, {
+      connection: {
+        url: 'https://v.example.com',
+        auth: { type: 'bearer', secretRef: 'NEW_REF' },
+      },
+    });
+    expect(updated.connection.auth?.secretRef).toBe('NEW_REF');
+    expect(updated.connection.auth?.secretEnc).toBeUndefined();
+  });
+
+  it('keeps stored customHeader values behind the marker', async () => {
+    const { svc, srv } = await seed();
+    const updated = await svc.updateServer(authAdmin, srv.id, {
+      connection: {
+        url: 'https://v.example.com',
+        customHeaders: { 'X-Tenant': '__stored__', 'X-New': 'fresh' },
+      },
+    });
+    expect(updated.connection.customHeaders).toEqual({
+      'X-Tenant': 'real-value',
+      'X-New': 'fresh',
+    });
+  });
+});
+
 describe('RegistryService.searchToolsFor', () => {
   it('only returns tools of healthy servers', async () => {
     const svc = makeService();
