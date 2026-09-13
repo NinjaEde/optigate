@@ -13,6 +13,7 @@ import { sanitizeAuthForClient } from './infra/mcp/authHeaders.js';
 import { createMcpGateway } from './infra/mcp/gateway.js';
 import { ToolIndexReconciler } from './infra/mcp/toolIndexReconciler.js';
 import type { ICredentialResolver } from './infra/mcp/credentialResolver.js';
+import type { ApiKeyService } from './services/apiKeyService.js';
 import type {
   AuthContext,
   MCPServer,
@@ -30,6 +31,8 @@ export interface AppOptions {
   pool: McpClientPool;
   /** Per-tenant credential bindings (isolation border, see multi-tenancy doc). */
   credentials: ICredentialResolver;
+  /** Gateway API key management (gateway-only identities). */
+  apiKeys: ApiKeyService;
   approvalRequired: boolean;
   /** Optional health check that runs on every /health call (e.g. DB ping). */
   healthCheck?: () => Promise<void>;
@@ -190,8 +193,13 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       return;
     }
     try {
-      (request as unknown as { auth: AuthContext }).auth =
-        await options.auth.resolveAuth(request);
+      const auth = await options.auth.resolveAuth(request);
+      (request as unknown as { auth: AuthContext }).auth = auth;
+      // Gateway-only identities: API keys may use /mcp but never /api.
+      if (auth.viaApiKey && request.url.startsWith('/api/')) {
+        reply.code(403).send({ error: 'API keys are gateway-only' });
+        return;
+      }
     } catch {
       reply.code(401).send({ error: 'Unauthorized' });
       return;
@@ -601,7 +609,15 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       }
 
       const rawBindings = await options.credentials.listBindings(id);
-      const bindings = rawBindings.map((b) => ({
+      // Tenant isolation: non-superadmins only see their own tenant's
+      // binding plus the platform default — never other tenants' refs.
+      const scoped =
+        auth.role === 'superadmin'
+          ? rawBindings
+          : rawBindings.filter(
+              (b) => b.tenantId === null || b.tenantId === auth.tenantId,
+            );
+      const bindings = scoped.map((b) => ({
         serverId: b.serverId,
         tenantId: b.tenantId,
         isDefault: b.tenantId === null,
@@ -696,6 +712,72 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     return typeof options.registry.audit.recent === 'function'
       ? options.registry.audit.recent(100, auth.role === 'superadmin' ? undefined : auth.tenantId)
       : [];
+  });
+
+  // ── Gateway API keys ────────────────────────────────────────────────
+  //
+  // Keys grant gateway-only access (/mcp search/execute): the onRequest
+  // hook above rejects key identities on every /api route, and keys can
+  // never create new keys. Admins manage keys of their own tenant,
+  // superadmins manage all. The plaintext secret is returned exactly
+  // once at creation; only the hash is stored.
+
+  const apiKeySchema = {
+    body: {
+      type: 'object',
+      required: ['name', 'role'],
+      properties: {
+        name: { type: 'string', minLength: 1, maxLength: 100 },
+        role: { enum: ['superadmin', 'admin', 'user'] },
+        tenantId: { type: 'string' },
+        expiresAt: { type: 'string' },
+      },
+      additionalProperties: false,
+    },
+  } as const;
+
+  app.post(
+    '/api/api-keys',
+    { schema: apiKeySchema },
+    async (request, reply) => {
+      const body = request.body as {
+        name: string;
+        role: AuthContext['role'];
+        tenantId?: string;
+        expiresAt?: string;
+      };
+      try {
+        const result = await options.apiKeys.createKey(getAuth(request), {
+          name: body.name,
+          role: body.role,
+          tenantId: body.tenantId ?? null,
+          expiresAt: body.expiresAt ?? null,
+        });
+        reply.code(201).send(result);
+      } catch (err) {
+        reply.code(403).send({ error: (err as Error).message });
+      }
+    },
+  );
+
+  app.get('/api/api-keys', async (request, reply) => {
+    try {
+      return { keys: await options.apiKeys.listKeys(getAuth(request)) };
+    } catch (err) {
+      reply.code(403).send({ error: (err as Error).message });
+    }
+  });
+
+  app.delete('/api/api-keys/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    try {
+      return await options.apiKeys.revokeKey(getAuth(request), id);
+    } catch (err) {
+      const message = (err as Error).message;
+      reply
+        .code(message.includes('not found') ? 404 : 403)
+        .send({ error: message });
+    }
   });
 
   // ── MCP facade (/mcp): the registry itself as an MCP server ───────────

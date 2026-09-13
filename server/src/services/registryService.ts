@@ -37,7 +37,9 @@ export interface AuditSink {
       | 'server.deleted'
       | 'server.status_changed'
       | 'tool.searched'
-      | 'tool.called';
+      | 'tool.called'
+      | 'apikey.created'
+      | 'apikey.revoked';
     subjectId: string | null;
     detail: Record<string, unknown>;
   }): Promise<void>;
@@ -62,6 +64,15 @@ export class RegistryService {
     this.assertConnectionValid(input.transport, input.connection);
 
     const shared = this.assertShared(auth, input.shared ?? false, input.transport);
+
+    // A non-shared tenant server stamped with a null tenant would be
+    // invisible to everyone (including its creator). Shared servers are
+    // visible platform-wide, so they are exempt.
+    if (input.scope === 'tenant' && !shared && !auth.tenantId) {
+      throw new Error(
+        'Tenant-scoped registration requires an identity with a tenant',
+      );
+    }
 
     const existing = await this.repo.findByNameInTenant(input.name, input.scope === 'global' ? null : auth.tenantId);
     if (existing && !existing.deletedAt) {
@@ -142,6 +153,10 @@ export class RegistryService {
 
   async disableServer(auth: AuthContext, id: string): Promise<MCPServer> {
     const server = await this.getVisibleServer(auth, id);
+    const { canManage } = await import('../domain/policy.js');
+    if (!canManage(auth, server)) {
+      throw new Error('Only admins of this server may disable it');
+    }
     server.status = 'disabled';
     server.updatedAt = new Date().toISOString();
     await this.repo.save(server);
@@ -193,6 +208,11 @@ export class RegistryService {
     patch: Partial<RegisterServerInput>,
   ): Promise<MCPServer> {
     const server = await this.getVisibleServer(auth, id);
+
+    const { canManage } = await import('../domain/policy.js');
+    if (!canManage(auth, server)) {
+      throw new Error('Only admins of this server may update it');
+    }
 
     if (patch.name !== undefined && patch.name !== server.name) {
       const tenantForName = server.scope === 'global' ? null : server.tenantId;
@@ -265,6 +285,10 @@ export class RegistryService {
 
   async deleteServer(auth: AuthContext, id: string): Promise<void> {
     const server = await this.getVisibleServer(auth, id);
+    const { canManage } = await import('../domain/policy.js');
+    if (!canManage(auth, server)) {
+      throw new Error('Only admins of this server may delete it');
+    }
     server.deletedAt = new Date().toISOString();
     server.status = 'disabled';
     server.updatedAt = server.deletedAt;
@@ -287,14 +311,16 @@ export class RegistryService {
   ): Promise<Array<SearchableTool & { score: number }>> {
     const { searchTools } = await import('../domain/toolSearch.js');
 
-    const visibleServers = new Set((await this.listServersFor(auth)).map((s) => s.id));
-    const usable = (await toolsProvider()).filter(
-      (t) =>
-        visibleServers.has(t.serverId) &&
-        ['healthy'].includes(
-          // status check happens via listServersFor filtering already
-          'healthy',
-        ),
+    // Only tools of visible AND healthy servers are searchable: tool
+    // metadata of disabled/offline/pending servers must not leak.
+    // (Execution additionally re-checks status per call.)
+    const healthyServers = new Set(
+      (await this.listServersFor(auth))
+        .filter((s) => s.status === 'healthy')
+        .map((s) => s.id),
+    );
+    const usable = (await toolsProvider()).filter((t) =>
+      healthyServers.has(t.serverId),
     );
 
     const results: Array<SearchableTool & { score: number }> = searchTools(

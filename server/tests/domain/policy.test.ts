@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 
 import {
+  canManage,
   canView,
   canRegister,
   canApprove,
@@ -20,6 +21,7 @@ const server = (over: Partial<MCPServer> = {}): MCPServer => ({
   name: 'rag-search',
   description: '',
   scope: 'tenant',
+  shared: false,
   ownerId: null,
   transport: 'streamable_http',
   connection: {},
@@ -65,6 +67,36 @@ describe('canRegister / canApprove', () => {
   it('only superadmin may approve', () => {
     expect(canApprove(auth('superadmin', 't1'))).toBe(true);
     expect(canApprove(auth('admin', 't1'))).toBe(false);
+  });
+});
+
+describe('canManage', () => {
+  it('superadmin manages everything', () => {
+    expect(canManage(auth('superadmin', 't9'), server())).toBe(true);
+    expect(
+      canManage(auth('superadmin', 't9'), server({ scope: 'global', tenantId: null })),
+    ).toBe(true);
+  });
+
+  it('admin manages own-tenant servers only', () => {
+    expect(canManage(auth('admin', 't1'), server())).toBe(true);
+    expect(canManage(auth('admin', 't2'), server())).toBe(false);
+  });
+
+  it('plain users manage nothing except owned private servers', () => {
+    expect(canManage(auth('user', 't1'), server())).toBe(false);
+    const owned = server({ scope: 'private', ownerId: 'u1' });
+    // auth() helper pins userId to 'u1', i.e. the owner here
+    expect(canManage(auth('user', 't1'), owned)).toBe(true);
+    const stranger: AuthContext = { userId: 'u2', role: 'user', tenantId: 't1' };
+    expect(canManage(stranger, owned)).toBe(false);
+  });
+
+  it('global and shared servers are superadmin-only', () => {
+    expect(
+      canManage(auth('admin', 't1'), server({ scope: 'global', tenantId: null })),
+    ).toBe(false);
+    expect(canManage(auth('admin', 't1'), server({ shared: true }))).toBe(false);
   });
 });
 

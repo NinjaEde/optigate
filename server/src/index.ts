@@ -2,6 +2,7 @@ import { buildApp } from './app.js';
 import { InMemoryServerRepository } from './infra/repositories/memoryServerRepository.js';
 import { InMemoryAuditLog } from './infra/repositories/memoryAuditLog.js';
 import {
+  PostgresApiKeyStore,
   PostgresServerRepository,
   PostgresAuditLog,
   PostgresCredentialResolver,
@@ -10,6 +11,8 @@ import { McpClientPool } from './infra/mcp/clientPool.js';
 import { createSdkTransport } from './infra/mcp/sdkTransport.js';
 import { verifyKeycloakToken } from './infra/auth/keycloak.js';
 import { InMemoryCredentialResolver } from './infra/mcp/credentialResolver.js';
+import { ApiKeyService } from './services/apiKeyService.js';
+import { InMemoryApiKeyStore } from './infra/repositories/memoryApiKeyStore.js';
 
 const PORT = Number(process.env.PORT ?? 8100);
 const APPROVAL_REQUIRED = process.env.APPROVAL_REQUIRED === 'true';
@@ -58,6 +61,7 @@ async function main() {
   let audit;
   let healthCheck: (() => Promise<void>) | undefined;
   let credentials;
+  let apiKeyStore;
 
   if (DATABASE_URL) {
     console.log('Using Postgres persistence');
@@ -69,6 +73,7 @@ async function main() {
     repo = serverRepo;
     audit = auditLog;
     credentials = new PostgresCredentialResolver(pool);
+    apiKeyStore = new PostgresApiKeyStore(pool);
     healthCheck = async () => {
       const client = await pool.connect();
       try {
@@ -83,10 +88,36 @@ async function main() {
     repo = new InMemoryServerRepository();
     audit = new InMemoryAuditLog();
     credentials = new InMemoryCredentialResolver();
+    apiKeyStore = new InMemoryApiKeyStore();
   }
 
+  const apiKeys = new ApiKeyService(apiKeyStore, audit);
+
   const app = await buildApp({
-    auth: { resolveAuth },
+    auth: {
+      /**
+       * Gateway API keys (x-api-key header) resolve first and yield a
+       * gateway-only identity; everything else falls back to the
+       * Keycloak/dev chain. A presented-but-invalid key fails closed.
+       */
+      resolveAuth: async (request) => {
+        const presented = String(request.headers['x-api-key'] ?? '');
+        if (presented) {
+          const identity = await apiKeys.verifyKey(presented);
+          if (!identity) {
+            throw new Error('Unauthorized');
+          }
+          return {
+            userId: identity.userId,
+            role: identity.role,
+            tenantId: identity.tenantId,
+            viaApiKey: true as const,
+          };
+        }
+        return resolveAuth(request);
+      },
+    },
+    apiKeys,
     registry: { repo, audit },
     pool: new McpClientPool(createSdkTransport, {
       maxConnectionsPerServer: Number(process.env.MAX_CONNS_PER_SERVER ?? 20),

@@ -189,6 +189,21 @@ function migrationSql(): string {
     );
     CREATE UNIQUE INDEX IF NOT EXISTS idx_sc_bindings_server_tenant
         ON server_credential_bindings (server_id, coalesce(tenant_id, ''));
+
+    CREATE TABLE IF NOT EXISTS api_keys (
+        id          UUID PRIMARY KEY,
+        name        TEXT NOT NULL,
+        key_prefix  TEXT NOT NULL,
+        key_hash    TEXT NOT NULL,
+        user_id     TEXT NOT NULL,
+        role        TEXT NOT NULL CHECK (role IN ('superadmin', 'admin', 'user')),
+        tenant_id   TEXT,
+        expires_at  TIMESTAMPTZ,
+        revoked_at  TIMESTAMPTZ,
+        created_by  TEXT NOT NULL,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_api_keys_prefix ON api_keys (key_prefix);
   `;
 }
 
@@ -244,8 +259,112 @@ export class PostgresAuditLog implements AuditSink {
 
 export type { PoolClient };
 
-import type { AuthConfig } from '../../domain/types.js';
+import type { ApiKey, AuthConfig } from '../../domain/types.js';
 import type { ICredentialResolver, CredentialBinding } from '../mcp/credentialResolver.js';
+import type { ApiKeyStore } from '../../services/apiKeyService.js';
+
+interface ApiKeyRow {
+  id: string;
+  name: string;
+  key_prefix: string;
+  key_hash: string;
+  user_id: string;
+  role: ApiKey['role'];
+  tenant_id: string | null;
+  expires_at: Date | null;
+  revoked_at: Date | null;
+  created_by: string;
+  created_at: Date;
+}
+
+function rowToApiKey(row: ApiKeyRow): ApiKey {
+  return {
+    id: row.id,
+    name: row.name,
+    keyPrefix: row.key_prefix,
+    keyHash: row.key_hash,
+    userId: row.user_id,
+    role: row.role,
+    tenantId: row.tenant_id,
+    expiresAt: row.expires_at ? row.expires_at.toISOString() : null,
+    revokedAt: row.revoked_at ? row.revoked_at.toISOString() : null,
+    createdBy: row.created_by,
+    createdAt: row.created_at.toISOString(),
+  };
+}
+
+/** Postgres-backed API key store. Reads/writes the api_keys table. */
+export class PostgresApiKeyStore implements ApiKeyStore {
+  constructor(private readonly pool: Pool) {}
+
+  async insert(key: ApiKey): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO api_keys
+        (id, name, key_prefix, key_hash, user_id, role, tenant_id,
+         expires_at, revoked_at, created_by, created_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      [
+        key.id,
+        key.name,
+        key.keyPrefix,
+        key.keyHash,
+        key.userId,
+        key.role,
+        key.tenantId,
+        key.expiresAt,
+        key.revokedAt,
+        key.createdBy,
+        key.createdAt,
+      ],
+    );
+  }
+
+  async findByPrefix(prefix: string): Promise<ApiKey[]> {
+    const res = await this.pool.query<ApiKeyRow>(
+      `SELECT * FROM api_keys WHERE key_prefix = $1`,
+      [prefix],
+    );
+    return res.rows.map(rowToApiKey);
+  }
+
+  async findById(id: string): Promise<ApiKey | null> {
+    const res = await this.pool.query<ApiKeyRow>(
+      `SELECT * FROM api_keys WHERE id = $1`,
+      [id],
+    );
+    return res.rows[0] ? rowToApiKey(res.rows[0]) : null;
+  }
+
+  async all(): Promise<ApiKey[]> {
+    const res = await this.pool.query<ApiKeyRow>(
+      `SELECT * FROM api_keys ORDER BY created_at DESC`,
+    );
+    return res.rows.map(rowToApiKey);
+  }
+
+  async save(key: ApiKey): Promise<void> {
+    await this.pool.query(
+      `UPDATE api_keys SET
+          name = $2, key_prefix = $3, key_hash = $4, user_id = $5,
+          role = $6, tenant_id = $7, expires_at = $8, revoked_at = $9,
+          created_by = $10, created_at = $11
+        WHERE id = $1`,
+      [
+        key.id,
+        key.name,
+        key.keyPrefix,
+        key.keyHash,
+        key.userId,
+        key.role,
+        key.tenantId,
+        key.expiresAt,
+        key.revokedAt,
+        key.createdBy,
+        key.createdAt,
+      ],
+    );
+  }
+}
 
 interface BindingRow {
   server_id: string;

@@ -63,6 +63,21 @@ export interface AuditEvent {
   detail: Record<string, unknown>;
 }
 
+export type ApiKeyRole = 'superadmin' | 'admin' | 'user';
+
+export interface ApiKey {
+  id: string;
+  name: string;
+  keyPrefix: string;
+  userId: string;
+  role: ApiKeyRole;
+  tenantId: string | null;
+  expiresAt: string | null;
+  revokedAt: string | null;
+  createdBy: string;
+  createdAt: string;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   // POST/PATCH without payload must not advertise a JSON body,
   // otherwise Fastify rejects the empty body with FST_ERR_CTP_EMPTY_JSON_BODY.
@@ -130,6 +145,19 @@ export const api = {
     request<{ tools: ToolMeta[] }>(`/servers/${id}/tools/refresh`, { method: 'POST' }),
   getTools: (id: string) => request<ToolMeta[]>(`/servers/${id}/tools`),
   audit: () => request<AuditEvent[]>('/audit'),
+  listApiKeys: () => request<{ keys: ApiKey[] }>('/api-keys'),
+  createApiKey: (payload: {
+    name: string;
+    role: ApiKeyRole;
+    tenantId?: string;
+    expiresAt?: string;
+  }) =>
+    request<{ key: ApiKey; secret: string }>('/api-keys', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  revokeApiKey: (id: string) =>
+    request<ApiKey>(`/api-keys/${id}`, { method: 'DELETE' }),
   /** Same retrieval path as the MCP facade's search_tools meta-tool. */
   searchTools: (query: string, limit: number) =>
     request<{

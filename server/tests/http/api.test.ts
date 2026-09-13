@@ -3,13 +3,15 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { buildApp } from '../../src/app';
 import { InMemoryServerRepository } from '../../src/infra/repositories/memoryServerRepository';
 import { InMemoryAuditLog } from '../../src/infra/repositories/memoryAuditLog';
+import { InMemoryApiKeyStore } from '../../src/infra/repositories/memoryApiKeyStore';
+import { ApiKeyService } from '../../src/services/apiKeyService';
 import { McpClientPool } from '../../src/infra/mcp/clientPool';
 import { CredentialResolver } from '../../src/infra/mcp/credentialResolver';
 import type { AuthContext } from '../../src/domain/types';
 
-const SUPER = { userId: 'u0', role: 'superadmin', tenantId: null };
-const ADMIN = { userId: 'u1', role: 'admin', tenantId: 't1' };
-const USER = { userId: 'u2', role: 'user', tenantId: 't1' };
+const SUPER: AuthContext = { userId: 'u0', role: 'superadmin', tenantId: null };
+const ADMIN: AuthContext = { userId: 'u1', role: 'admin', tenantId: 't1' };
+const USER: AuthContext = { userId: 'u2', role: 'user', tenantId: 't1' };
 
 async function makeApp() {
   const audit = new InMemoryAuditLog();
@@ -23,7 +25,7 @@ async function makeApp() {
         }
         if (name === 'super') return SUPER;
         if (name === 'user') return USER;
-        return ADMIN as AuthContext;
+        return ADMIN;
       },
     },
     registry: {
@@ -34,6 +36,7 @@ async function makeApp() {
       throw new Error('no transports in test');
     }),
     credentials: new CredentialResolver(),
+    apiKeys: new ApiKeyService(new InMemoryApiKeyStore(), audit),
     approvalRequired: false,
   });
   await app.ready();

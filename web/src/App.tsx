@@ -8,16 +8,18 @@ import {
   Search,
   X,
   Wrench,
+  KeyRound,
 } from 'lucide-react';
 
 import { api, type MCPServer, type AuditEvent, type ToolMeta } from './api';
 import { ServerDialog } from './components/ServerDialog';
 import { ServerCard } from './components/ServerCard';
 import { ToolSearchView } from './components/ToolSearchView';
+import { ApiKeysView } from './components/ApiKeysView';
 import { LanguageDropdown } from './components/LanguageDropdown';
 import { LangContext, useT, type Lang } from './i18n';
 
-type View = 'servers' | 'tools' | 'audit';
+type View = 'servers' | 'tools' | 'audit' | 'apikeys';
 
 export function App() {
   const [lang, setLang] = useState<Lang>(() => {
@@ -128,6 +130,7 @@ function AppBody({ onSwitchLang }: { onSwitchLang: (lang: Lang) => void }) {
                 [
                   ['servers', t.app.views.servers, <Server key="i" size={15} />],
                   ['tools', t.app.views.tools, <Wrench key="i" size={15} />],
+                  ['apikeys', t.app.views.apikeys, <KeyRound key="i" size={15} />],
                   ['audit', t.app.views.audit, <ScrollText key="i" size={15} />],
                 ] as const
               ).map(([key, label, icon]) => (
@@ -152,7 +155,8 @@ function AppBody({ onSwitchLang }: { onSwitchLang: (lang: Lang) => void }) {
             <LanguageDropdown lang={lang} onChange={onSwitchLang} />
           </div>
 
-          {/* Suchzeile: Suche links · Statistik · Aktionen rechts */}
+          {/* Suchzeile: Suche links · Statistik · Aktionen rechts (nur Server-View) */}
+          {view === 'servers' && (
           <div className="mt-8 flex flex-wrap items-center gap-x-6 gap-y-3 border-t border-line pt-5">
             <label className="relative order-first w-full sm:w-auto sm:min-w-[280px] sm:flex-1 sm:max-w-sm">
               <span className="sr-only">{t.search.srLabel}</span>
@@ -225,6 +229,7 @@ function AppBody({ onSwitchLang }: { onSwitchLang: (lang: Lang) => void }) {
               </button>
             </div>
           </div>
+          )}
         </header>
 
         {error && (
@@ -236,6 +241,8 @@ function AppBody({ onSwitchLang }: { onSwitchLang: (lang: Lang) => void }) {
         {/* ── Content ── */}
         {view === 'tools' ? (
           <ToolSearchView />
+        ) : view === 'apikeys' ? (
+          <ApiKeysView />
         ) : view === 'audit' ? (
           <div className="overflow-hidden rounded-xl border border-line bg-panel/80">
             <table className="w-full min-w-[640px] text-left text-sm">

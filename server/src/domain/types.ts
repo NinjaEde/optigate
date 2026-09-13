@@ -108,10 +108,13 @@ export interface AuditEvent {
     | 'server.updated'
     | 'server.approved'
     | 'server.disabled'
+    | 'server.enabled'
     | 'server.deleted'
     | 'server.status_changed'
     | 'tool.searched'
-    | 'tool.called';
+    | 'tool.called'
+    | 'apikey.created'
+    | 'apikey.revoked';
   subjectId: string | null;
   detail: Record<string, unknown>;
 }
@@ -119,5 +122,37 @@ export interface AuditEvent {
 export interface AuthContext {
   userId: string;
   role: 'superadmin' | 'admin' | 'user';
+  tenantId: string | null;
+  /**
+   * True when the identity was established via a gateway API key.
+   * API keys are gateway-only: /api management routes reject them.
+   */
+  viaApiKey?: boolean;
+}
+
+/**
+ * Gateway API key record. Only the SHA-256 hash is stored — the plaintext
+ * secret is shown exactly once at creation time and never again.
+ */
+export interface ApiKey {
+  id: string;
+  name: string;
+  /** First characters of the secret (e.g. "og_abc123") for identification. */
+  keyPrefix: string;
+  keyHash: string;
+  userId: string;
+  role: AuthContext['role'];
+  tenantId: string | null;
+  expiresAt: string | null;
+  revokedAt: string | null;
+  createdBy: string;
+  createdAt: string;
+}
+
+/** Identity resolved from a valid API key (gateway-only access). */
+export interface ApiKeyIdentity {
+  keyId: string;
+  userId: string;
+  role: AuthContext['role'];
   tenantId: string | null;
 }

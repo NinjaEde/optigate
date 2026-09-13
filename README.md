@@ -115,6 +115,23 @@ Register OptiGate once in any MCP client:
 That's it — `search_tools` and `execute_tool` now give the client access to
 every visible registry server.
 
+For machine clients (agents, CI) without Keycloak, admins can issue
+**gateway API keys** (`POST /api/api-keys` — admin: own tenant only,
+superadmin: any tenant). Keys are gateway-only (`/mcp`, never `/api`),
+bound to a user/role/tenant, and shown in plaintext exactly once:
+
+```json
+{
+  "mcpServers": {
+    "optigate": {
+      "type": "http",
+      "url": "http://localhost:8100/mcp",
+      "headers": { "x-api-key": "og_..." }
+    }
+  }
+}
+```
+
 ## How the token saving works
 
 1. `search_tools("chart", k=5)` → lexically scored tool cards (name,

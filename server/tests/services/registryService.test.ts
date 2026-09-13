@@ -3,6 +3,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { InMemoryServerRepository } from '../../src/infra/repositories/memoryServerRepository';
 import { RegistryService } from '../../src/services/registryService';
 import type { AuthContext } from '../../src/domain/types';
+import type { SearchableTool } from '../../src/domain/toolSearch';
 
 const authAdmin: AuthContext = { userId: 'u1', role: 'admin', tenantId: 't1' };
 const authSuper: AuthContext = { userId: 'u0', role: 'superadmin', tenantId: null };
@@ -112,5 +113,75 @@ describe('RegistryService.listServersFor', () => {
     await svc.deleteServer(authAdmin, mine.id);
     const after = await svc.listServersFor(authAdmin);
     expect(after.find((s) => s.id === mine.id)).toBeUndefined();
+  });
+});
+
+describe('RegistryService.manage authorization', () => {
+  it('rejects updates and deletes by plain users', async () => {
+    const svc = makeService();
+    const srv = await svc.registerServer(authAdmin, {
+      name: 'managed',
+      description: '',
+      scope: 'tenant',
+      transport: 'streamable_http',
+      connection: { url: 'https://a.example.com' },
+    });
+    const user: AuthContext = { userId: 'u2', role: 'user', tenantId: 't1' };
+
+    await expect(
+      svc.updateServer(user, srv.id, { description: 'x' }),
+    ).rejects.toThrow(/admin/i);
+    await expect(svc.disableServer(user, srv.id)).rejects.toThrow(/admin/i);
+    await expect(svc.deleteServer(user, srv.id)).rejects.toThrow(/admin/i);
+  });
+
+  it('rejects tenant-scoped registration without a tenant', async () => {
+    await expect(
+      makeService().registerServer(authSuper, {
+        name: 'tenantless',
+        description: '',
+        scope: 'tenant',
+        transport: 'streamable_http',
+        connection: { url: 'https://a.example.com' },
+      }),
+    ).rejects.toThrow(/tenant/i);
+  });
+});
+
+describe('RegistryService.searchToolsFor', () => {
+  it('only returns tools of healthy servers', async () => {
+    const svc = makeService();
+    const healthy = await svc.registerServer(authAdmin, {
+      name: 'up',
+      description: '',
+      scope: 'tenant',
+      transport: 'streamable_http',
+      connection: { url: 'https://up.example.com' },
+    });
+    const down = await svc.registerServer(authAdmin, {
+      name: 'down',
+      description: '',
+      scope: 'tenant',
+      transport: 'streamable_http',
+      connection: { url: 'https://down.example.com' },
+    });
+    await svc.disableServer(authSuper, down.id);
+
+    const tool = (serverId: string, name: string): SearchableTool => ({
+      serverId,
+      serverName: serverId,
+      name,
+      description: `${name} tool`,
+      inputSchema: {},
+      lastSeenAt: new Date().toISOString(),
+    });
+
+    const results = await svc.searchToolsFor(authAdmin, 'tool', 10, async () => [
+      tool(healthy.id, 'tool_alpha'),
+      tool(down.id, 'tool_beta'),
+    ]);
+
+    expect(results.map((r) => r.name)).toContain('tool_alpha');
+    expect(results.map((r) => r.name)).not.toContain('tool_beta');
   });
 });
