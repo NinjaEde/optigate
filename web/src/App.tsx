@@ -111,22 +111,31 @@ function AppBody({ onSwitchLang }: { onSwitchLang: (lang: Lang) => void }) {
       (m) => {
         setAuthMode(m.mode);
         if (m.mode === 'local') {
-          auth.me().then(
-            (me) => {
-              applyIdentity(me.role, me.tenantId);
-              setLocalUser({
-                id: me.userId,
-                username: me.username ?? me.userId,
-                role: me.role as LocalUser['role'],
-                tenantId: me.tenantId,
-                isActive: true,
-                createdAt: '',
-                updatedAt: '',
-              });
-              void reload();
-            },
-            () => undefined,
-          ).finally(() => setAuthChecked(true));
+          // No stored session: go straight to the login form without
+          // probing /auth/me (an unauthenticated probe only produces a
+          // 401 that browsers log as a console error).
+          if (!tokenStorage.get()) {
+            setAuthChecked(true);
+          } else {
+            auth.me().then(
+              (me) => {
+                applyIdentity(me.role, me.tenantId);
+                setLocalUser({
+                  id: me.userId,
+                  username: me.username ?? me.userId,
+                  role: me.role as LocalUser['role'],
+                  tenantId: me.tenantId,
+                  isActive: true,
+                  createdAt: '',
+                  updatedAt: '',
+                });
+                void reload();
+              },
+              // Expired/revoked token: tokenStorage is already cleared by
+              // authRequest — fall through to the login form.
+              () => undefined,
+            ).finally(() => setAuthChecked(true));
+          }
         } else {
           void reload();
           // Own identity for gating admin-only views; failure keeps the nav

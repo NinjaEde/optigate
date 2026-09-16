@@ -21,7 +21,9 @@ services:
     environment:
       NODE_ENV: production
       PORT: 8100
-      AUTH_MODE: keycloak
+      # keycloak = Keycloak JWT (default) · local = username/password login
+      # (needs LOCAL_JWT_SECRET + bootstrap admin, see .env.example)
+      AUTH_MODE: ${AUTH_MODE:-keycloak}
       KEYCLOAK_URL: ${KEYCLOAK_URL}
       KEYCLOAK_REALM: ${KEYCLOAK_REALM}
       APPROVAL_REQUIRED: ${APPROVAL_REQUIRED:-true}
@@ -29,6 +31,12 @@ services:
       SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY}
       SSRF_ALLOWED_HOSTS: ${SSRF_ALLOWED_HOSTS}
       CORS_ORIGIN: ${CORS_ORIGIN}
+      # ── Local auth (only evaluated when AUTH_MODE=local) ──────────────
+      LOCAL_JWT_SECRET: ${LOCAL_JWT_SECRET:-}
+      LOCAL_JWT_TTL: ${LOCAL_JWT_TTL:-12h}
+      LOCAL_BOOTSTRAP_ADMIN_USER: ${LOCAL_BOOTSTRAP_ADMIN_USER:-}
+      LOCAL_BOOTSTRAP_ADMIN_PASSWORD: ${LOCAL_BOOTSTRAP_ADMIN_PASSWORD:-}
+      LOCAL_BOOTSTRAP_ADMIN_TENANT: ${LOCAL_BOOTSTRAP_ADMIN_TENANT:-}
     ports:
       - '8100:8100'
     depends_on:
