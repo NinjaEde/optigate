@@ -211,6 +211,18 @@ function migrationSql(): string {
         updated_by  TEXT NOT NULL,
         updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
     );
+
+    CREATE TABLE IF NOT EXISTS local_users (
+        id            UUID PRIMARY KEY,
+        username      TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        role          TEXT NOT NULL CHECK (role IN ('superadmin', 'admin', 'user')),
+        tenant_id     TEXT,
+        is_active     BOOLEAN NOT NULL DEFAULT true,
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_local_users_username ON local_users (username);
   `;
 }
 
@@ -266,10 +278,11 @@ export class PostgresAuditLog implements AuditSink {
 
 export type { PoolClient };
 
-import type { ApiKey, AuthConfig } from '../../domain/types.js';
+import type { ApiKey, AuthConfig, LocalUser } from '../../domain/types.js';
 import type { ICredentialResolver, CredentialBinding } from '../mcp/credentialResolver.js';
 import type { ApiKeyStore } from '../../services/apiKeyService.js';
 import type { SettingsStore } from '../../services/settingsService.js';
+import type { UserStore } from '../../services/userService.js';
 
 /** Postgres-backed runtime settings overrides (app_settings table). */
 export class PostgresSettingsStore implements SettingsStore {
@@ -480,5 +493,101 @@ export class PostgresCredentialResolver implements ICredentialResolver {
       [serverId],
     );
     return defaultRes.rows[0]?.auth_enc as unknown as AuthConfig | undefined;
+  }
+}
+
+interface LocalUserRow {
+  id: string;
+  username: string;
+  password_hash: string;
+  role: LocalUser['role'];
+  tenant_id: string | null;
+  is_active: boolean;
+  created_at: Date;
+  updated_at: Date;
+}
+
+function rowToLocalUser(row: LocalUserRow): LocalUser {
+  return {
+    id: row.id,
+    username: row.username,
+    passwordHash: row.password_hash,
+    role: row.role,
+    tenantId: row.tenant_id,
+    isActive: row.is_active,
+    createdAt: row.created_at.toISOString(),
+    updatedAt: row.updated_at.toISOString(),
+  };
+}
+
+/** Postgres-backed local user store (local_users table). */
+export class PostgresUserStore implements UserStore {
+  constructor(private readonly pool: Pool) {}
+
+  async insert(user: LocalUser): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO local_users
+        (id, username, password_hash, role, tenant_id, is_active, created_at, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [
+        user.id,
+        user.username,
+        user.passwordHash,
+        user.role,
+        user.tenantId,
+        user.isActive,
+        user.createdAt,
+        user.updatedAt,
+      ],
+    );
+  }
+
+  async findById(id: string): Promise<LocalUser | null> {
+    const res = await this.pool.query<LocalUserRow>(
+      `SELECT * FROM local_users WHERE id = $1`,
+      [id],
+    );
+    return res.rows[0] ? rowToLocalUser(res.rows[0]) : null;
+  }
+
+  async findByUsername(username: string): Promise<LocalUser | null> {
+    const res = await this.pool.query<LocalUserRow>(
+      `SELECT * FROM local_users WHERE username = $1`,
+      [username],
+    );
+    return res.rows[0] ? rowToLocalUser(res.rows[0]) : null;
+  }
+
+  async all(): Promise<LocalUser[]> {
+    const res = await this.pool.query<LocalUserRow>(
+      `SELECT * FROM local_users ORDER BY username ASC`,
+    );
+    return res.rows.map(rowToLocalUser);
+  }
+
+  async save(user: LocalUser): Promise<void> {
+    await this.pool.query(
+      `UPDATE local_users SET
+         username = $2, password_hash = $3, role = $4, tenant_id = $5,
+         is_active = $6, created_at = $7, updated_at = $8
+       WHERE id = $1`,
+      [
+        user.id,
+        user.username,
+        user.passwordHash,
+        user.role,
+        user.tenantId,
+        user.isActive,
+        user.createdAt,
+        user.updatedAt,
+      ],
+    );
+  }
+
+  async count(): Promise<number> {
+    const res = await this.pool.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM local_users`,
+    );
+    return Number(res.rows[0]?.count ?? 0);
   }
 }

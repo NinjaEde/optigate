@@ -42,7 +42,14 @@ cd web && npm run lint && npm run typecheck
 
 ## Auth
 
-- Production: Keycloak JWT (RS256)
+- Production: Keycloak JWT (RS256) — `AUTH_MODE=keycloak` (default)
+- Local mode: Set `AUTH_MODE=local` (+ `LOCAL_JWT_SECRET` ≥32 chars) for
+  username/password login without Keycloak:
+  - `POST /auth/login` → HS256 Bearer JWT, `GET /auth/mode` is public
+  - Users live in `local_users` (Postgres) or memory; manage via `/api/users`
+    (admins: own tenant only, no self-signup)
+  - Bootstrap: `LOCAL_BOOTSTRAP_ADMIN_USER` + `LOCAL_BOOTSTRAP_ADMIN_PASSWORD`
+  - Local auth code: `server/src/infra/auth/local.ts`, `server/src/services/userService.ts`
 - Dev mode: Set `AUTH_MODE=dev`, control identity via headers:
   - `x-dev-user` (default: `dev-user`)
   - `x-dev-role` (`superadmin` | `admin` | `user`)

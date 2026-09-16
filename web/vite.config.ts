@@ -17,6 +17,10 @@ export default defineConfig(({ mode }) => {
           target: env.VITE_API_TARGET ?? 'http://server:8100',
           changeOrigin: true,
         },
+        '/auth': {
+          target: env.VITE_API_TARGET ?? 'http://server:8100',
+          changeOrigin: true,
+        },
       },
     },
   };

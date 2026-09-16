@@ -41,6 +41,9 @@ export interface AuditSink {
       | 'tool.called'
       | 'apikey.created'
       | 'apikey.revoked'
+      | 'user.created'
+      | 'user.updated'
+      | 'user.deactivated'
       | 'setting.changed';
     subjectId: string | null;
     detail: Record<string, unknown>;

@@ -89,21 +89,88 @@ export interface Setting {
   description: string;
 }
 
+export interface LocalUser {
+  id: string;
+  username: string;
+  role: ApiKeyRole;
+  tenantId: string | null;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AuthMode {
+  mode: string;
+}
+
+const TOKEN_KEY = 'optigate.token';
+
+export const tokenStorage = {
+  get(): string | null {
+    try {
+      return localStorage.getItem(TOKEN_KEY);
+    } catch {
+      return null;
+    }
+  },
+  set(token: string): void {
+    try {
+      localStorage.setItem(TOKEN_KEY, token);
+    } catch {
+      // private mode: sessions simply don't persist
+    }
+  },
+  clear(): void {
+    try {
+      localStorage.removeItem(TOKEN_KEY);
+    } catch {
+      // ignore
+    }
+  },
+};
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   // POST/PATCH without payload must not advertise a JSON body,
   // otherwise Fastify rejects the empty body with FST_ERR_CTP_EMPTY_JSON_BODY.
   const hasBody = init?.body !== undefined;
+  const token = tokenStorage.get();
   const headers: Record<string, string> = {
     ...(hasBody ? { 'Content-Type': 'application/json' } : {}),
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
     ...((init?.headers as Record<string, string>) ?? {}),
   };
   const res = await fetch(`/api${path}`, { ...init, headers });
+  if (res.status === 401) {
+    // Local-mode sessions expire: drop the stale token so the UI can
+    // fall back to the login form instead of retrying with it.
+    tokenStorage.clear();
+  }
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error((body as { error?: string }).error ?? 'Request failed');
   }
   if (res.status === 204) {
     return undefined as T;
+  }
+  return res.json() as Promise<T>;
+}
+
+/** Same auth-header handling for the top-level /auth routes (no /api prefix). */
+async function authRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const hasBody = init?.body !== undefined;
+  const token = tokenStorage.get();
+  const headers: Record<string, string> = {
+    ...(hasBody ? { 'Content-Type': 'application/json' } : {}),
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...((init?.headers as Record<string, string>) ?? {}),
+  };
+  const res = await fetch(`/auth${path}`, { ...init, headers });
+  if (res.status === 401) {
+    tokenStorage.clear();
+  }
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error((body as { error?: string }).error ?? 'Request failed');
   }
   return res.json() as Promise<T>;
 }
@@ -157,7 +224,7 @@ export const api = {
   getTools: (id: string) => request<ToolMeta[]>(`/servers/${id}/tools`),
   audit: () => request<AuditEvent[]>('/audit'),
   whoami: () =>
-    request<{ userId: string; role: string; tenantId: string | null }>(
+    request<{ userId: string; role: string; tenantId: string | null; mode?: string }>(
       '/whoami',
     ),
   listApiKeys: () => request<{ keys: ApiKey[] }>('/api-keys'),
@@ -193,4 +260,54 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ query, limit }),
     }),
+};
+
+export const auth = {
+  mode: () => authRequest<AuthMode>('/mode'),
+  login: async (username: string, password: string) => {
+    const res = await authRequest<{
+      token: string;
+      expiresAt: string;
+      user: LocalUser;
+    }>('/login', {
+      method: 'POST',
+      body: JSON.stringify({ username, password }),
+    });
+    tokenStorage.set(res.token);
+    return res;
+  },
+  logout: () => tokenStorage.clear(),
+  me: () =>
+    authRequest<{
+      userId: string;
+      username?: string;
+      role: string;
+      tenantId: string | null;
+    }>('/me'),
+  listUsers: () => request<{ users: LocalUser[] }>('/users'),
+  createUser: (payload: {
+    username: string;
+    password: string;
+    role: ApiKeyRole;
+    tenantId?: string;
+  }) =>
+    request<LocalUser>('/users', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  updateUser: (
+    id: string,
+    payload: {
+      role?: ApiKeyRole;
+      tenantId?: string | null;
+      isActive?: boolean;
+      password?: string;
+    },
+  ) =>
+    request<LocalUser>(`/users/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    }),
+  deactivateUser: (id: string) =>
+    request<LocalUser>(`/users/${id}`, { method: 'DELETE' }),
 };

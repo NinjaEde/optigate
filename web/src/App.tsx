@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Server,
   ScrollText,
@@ -10,18 +10,22 @@ import {
   Wrench,
   KeyRound,
   SlidersHorizontal,
+  Users,
+  LogOut,
 } from 'lucide-react';
 
-import { api, type MCPServer, type AuditEvent, type ToolMeta } from './api';
+import { api, auth, tokenStorage, type MCPServer, type AuditEvent, type ToolMeta, type LocalUser } from './api';
 import { ServerDialog } from './components/ServerDialog';
 import { ServerCard } from './components/ServerCard';
 import { ToolSearchView } from './components/ToolSearchView';
 import { ApiKeysView } from './components/ApiKeysView';
 import { SettingsView } from './components/SettingsView';
+import { LoginView } from './components/LoginView';
+import { UsersView } from './components/UsersView';
 import { LanguageDropdown } from './components/LanguageDropdown';
 import { LangContext, useLang, useT, type Lang } from './i18n';
 
-type View = 'servers' | 'tools' | 'audit' | 'apikeys' | 'settings';
+type View = 'servers' | 'tools' | 'audit' | 'apikeys' | 'settings' | 'users';
 
 export function App() {
   const [lang, setLang] = useState<Lang>(() => {
@@ -61,27 +65,96 @@ function AppBody({ onSwitchLang }: { onSwitchLang: (lang: Lang) => void }) {
     role: string;
     tenantId: string | null;
   } | null>(null);
+  const [authMode, setAuthMode] = useState<string | null>(null);
+  const [localUser, setLocalUser] = useState<LocalUser | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
 
-  async function reload() {
+  const reload = useCallback(async () => {
     try {
       setServers(await api.listServers());
       setAudit(await api.audit());
       setError(null);
     } catch (err) {
+      // Expired local sessions land here: fall back to the login form.
+      if (authMode === 'local' && !tokenStorage.get()) {
+        setLocalUser(null);
+        setIdentity(null);
+      }
       setError((err as Error).message);
     }
+  }, [authMode]);
+
+  function applyIdentity(role: string, tenantId: string | null) {
+    setIdentity({ role, tenantId });
+  }
+
+  function handleLoggedIn(user: LocalUser) {
+    setLocalUser(user);
+    applyIdentity(user.role, user.tenantId);
+    setView('servers');
+    void reload();
+  }
+
+  function handleLogout() {
+    auth.logout();
+    setLocalUser(null);
+    setIdentity(null);
+    setServers([]);
+    setAudit([]);
+    setView('servers');
   }
 
   useEffect(() => {
-    void reload();
-    // Own identity for gating admin-only views; failure keeps the nav
-    // visible (endpoints still enforce server-side).
-    api.whoami().then(setIdentity, () => undefined);
+    // Auth mode decides the boot path: 'local' needs a Bearer session
+    // (login form when absent), dev/keycloak keep the previous behavior.
+    auth.mode().then(
+      (m) => {
+        setAuthMode(m.mode);
+        if (m.mode === 'local') {
+          auth.me().then(
+            (me) => {
+              applyIdentity(me.role, me.tenantId);
+              setLocalUser({
+                id: me.userId,
+                username: me.username ?? me.userId,
+                role: me.role as LocalUser['role'],
+                tenantId: me.tenantId,
+                isActive: true,
+                createdAt: '',
+                updatedAt: '',
+              });
+              void reload();
+            },
+            () => undefined,
+          ).finally(() => setAuthChecked(true));
+        } else {
+          void reload();
+          // Own identity for gating admin-only views; failure keeps the nav
+          // visible (endpoints still enforce server-side).
+          api.whoami().then(
+            (me) => applyIdentity(me.role, me.tenantId),
+            () => undefined,
+          );
+          setAuthChecked(true);
+        }
+      },
+      () => {
+        // /auth/mode unreachable (old server): legacy boot path.
+        void reload();
+        api.whoami().then(
+          (me) => applyIdentity(me.role, me.tenantId),
+          () => undefined,
+        );
+        setAuthChecked(true);
+      },
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Fail closed: key and settings management appear only for
   // confirmed admin identities (briefly hidden for everyone while loading).
   const mayManage = identity !== null && identity.role !== 'user';
+  const showUsers = authMode === 'local' && mayManage;
 
   function handleValidated(id: string, tools: ToolMeta[]) {
     setToolsByServer((prev) => ({ ...prev, [id]: tools }));
@@ -105,6 +178,30 @@ function AppBody({ onSwitchLang }: { onSwitchLang: (lang: Lang) => void }) {
         s.description.toLowerCase().includes(q),
     );
   }, [servers, query]);
+
+  // Local mode without a session: login form instead of the dashboard.
+  // (After all hooks — Rules of Hooks.)
+  if (authMode === 'local' && authChecked && !localUser) {
+    return (
+      <div className="min-h-screen bg-stage text-ink">
+        <div
+          aria-hidden="true"
+          className="pointer-events-none fixed inset-0 opacity-[0.35]"
+          style={{
+            backgroundImage:
+              'radial-gradient(circle at 1px 1px, #1c2233 1px, transparent 0)',
+            backgroundSize: '28px 28px',
+          }}
+        />
+        <div className="relative mx-auto max-w-7xl px-4 py-10 sm:px-6 lg:px-8">
+          <div className="mb-6 flex justify-end">
+            <LanguageDropdown lang={lang} onChange={onSwitchLang} />
+          </div>
+          <LoginView onLoggedIn={handleLoggedIn} />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-stage text-ink">
@@ -153,6 +250,9 @@ function AppBody({ onSwitchLang }: { onSwitchLang: (lang: Lang) => void }) {
                   ...(mayManage
                     ? [['settings', t.app.views.settings, <SlidersHorizontal key="i" size={15} />] as const]
                     : []),
+                  ...(showUsers
+                    ? [['users', t.app.views.users, <Users key="i" size={15} />] as const]
+                    : []),
                   ['audit', t.app.views.audit, <ScrollText key="i" size={15} />],
                 ] as const
               ).map(([key, label, icon]) => (
@@ -175,6 +275,23 @@ function AppBody({ onSwitchLang }: { onSwitchLang: (lang: Lang) => void }) {
             </nav>
 
             <LanguageDropdown lang={lang} onChange={onSwitchLang} />
+
+            {authMode === 'local' && localUser && (
+              <div className="flex items-center gap-2 rounded-lg border border-line px-3 py-2 text-sm">
+                <span className="max-w-[140px] truncate font-mono text-xs text-muted" title={localUser.username}>
+                  {localUser.username}
+                </span>
+                <button
+                  type="button"
+                  onClick={handleLogout}
+                  aria-label={t.login.logout}
+                  title={t.login.logout}
+                  className="rounded-md p-1 text-muted transition hover:text-ink"
+                >
+                  <LogOut size={15} />
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Suchzeile: Suche links · Statistik · Aktionen rechts (nur Server-View) */}
@@ -270,6 +387,11 @@ function AppBody({ onSwitchLang }: { onSwitchLang: (lang: Lang) => void }) {
           />
         ) : view === 'settings' ? (
           <SettingsView role={identity?.role ?? null} />
+        ) : view === 'users' ? (
+          <UsersView
+            role={identity?.role ?? null}
+            tenantId={identity?.tenantId ?? null}
+          />
         ) : view === 'audit' ? (
           <div
             role="region"

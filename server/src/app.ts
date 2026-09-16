@@ -15,6 +15,9 @@ import { ToolIndexReconciler } from './infra/mcp/toolIndexReconciler.js';
 import type { ICredentialResolver } from './infra/mcp/credentialResolver.js';
 import type { ApiKeyService } from './services/apiKeyService.js';
 import type { SettingsService } from './services/settingsService.js';
+import type { UserService } from './services/userService.js';
+import { LOCAL_MIN_PASSWORD_LENGTH, toUserPublic } from './services/userService.js';
+import { signLocalToken } from './infra/auth/local.js';
 import { ForbiddenError, NotFoundError, ValidationError } from './services/errors.js';
 import type {
   AuthContext,
@@ -43,6 +46,12 @@ export interface AppOptions {
   healthCheck?: () => Promise<void>;
   /** Comma-separated allowed CORS origins (default: *). */
   corsOrigin?: string;
+  /** Local user management (AUTH_MODE=local). Absent = user routes disabled. */
+  users?: UserService;
+  /** Effective auth mode: 'dev' | 'local' | 'keycloak'. Default 'keycloak'. */
+  authMode?: string;
+  /** HS256 signing config for local-mode JWTs (required for /auth/login). */
+  local?: { jwtSecret: string; ttlMs: number };
 }
 
 const registerSchema = {
@@ -197,7 +206,12 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
   });
 
   app.addHook('onRequest', async (request, reply) => {
-    if (request.url.startsWith('/health') || request.method === 'OPTIONS') {
+    if (
+      request.url.startsWith('/health')
+      || request.url.startsWith('/auth/login')
+      || request.url.startsWith('/auth/mode')
+      || request.method === 'OPTIONS'
+    ) {
       return;
     }
     try {
@@ -300,6 +314,82 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       await options.healthCheck();
     }
     return { status: 'healthy' };
+  });
+
+  // ── Local auth (AUTH_MODE=local) ─────────────────────────────────────
+  //
+  // Username/password login without any external IdP. Passwords are scrypt
+  // hashes (see infra/auth/local.ts); sessions are self-signed HS256 JWTs
+  // (LOCAL_JWT_SECRET). /auth/mode is public so the UI knows whether to
+  // show a login form; /auth/login is rate-limited by the global limiter.
+
+  const authMode = options.authMode ?? 'keycloak';
+
+  app.get('/auth/mode', async () => {
+    return { mode: authMode };
+  });
+
+  app.post(
+    '/auth/login',
+    {
+      schema: {
+        body: {
+          type: 'object',
+          required: ['username', 'password'],
+          properties: {
+            username: { type: 'string', minLength: 1, maxLength: 64 },
+            password: { type: 'string', minLength: 1, maxLength: 512 },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    async (request, reply) => {
+      if (!options.users || !options.local) {
+        reply.code(404).send({ error: 'Local auth is disabled' });
+        return;
+      }
+      const { username, password } = request.body as {
+        username?: string;
+        password?: string;
+      };
+      // Deliberately generic: must not reveal whether the username exists.
+      const user
+        = typeof username === 'string' && typeof password === 'string'
+          ? await options.users.verifyCredentials(username, password)
+          : null;
+      if (!user) {
+        reply.code(401).send({ error: 'Invalid credentials' });
+        return;
+      }
+      const { token, expiresAt } = signLocalToken(
+        {
+          id: user.id,
+          username: user.username,
+          role: user.role,
+          tenantId: user.tenantId,
+        },
+        options.local.jwtSecret,
+        options.local.ttlMs,
+      );
+      return { token, expiresAt, user: toUserPublic(user) };
+    },
+  );
+
+  app.get('/auth/me', async (request) => {
+    const auth = getAuth(request);
+    if (options.users) {
+      const self = await options.users.findById(auth.userId).catch(() => null);
+      if (self) {
+        return {
+          userId: auth.userId,
+          username: self.username,
+          role: auth.role,
+          tenantId: auth.tenantId,
+        };
+      }
+    }
+    return { userId: auth.userId, role: auth.role, tenantId: auth.tenantId };
   });
 
   // ── Admin: server lifecycle ────────────────────────────────────────────
@@ -749,7 +839,133 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
   // ── Own identity (lets the UI gate admin-only views) ────────────────
   app.get('/api/whoami', async (request) => {
     const auth = getAuth(request);
-    return { userId: auth.userId, role: auth.role, tenantId: auth.tenantId };
+    return {
+      userId: auth.userId,
+      role: auth.role,
+      tenantId: auth.tenantId,
+      mode: authMode,
+    };
+  });
+
+  // ── Local user management (admins only, no self-signup) ──────────────
+  //
+  // Only available when the server was built with a UserService (local
+  // mode). Superadmins manage all users; admins manage users of their own
+  // tenant only and never above their own role (enforced in UserService).
+
+  const userSchema = {
+    body: {
+      type: 'object',
+      required: ['username', 'password', 'role'],
+      properties: {
+        username: { type: 'string', minLength: 3, maxLength: 64 },
+        password: {
+          type: 'string',
+          minLength: LOCAL_MIN_PASSWORD_LENGTH,
+          maxLength: 512,
+        },
+        role: { enum: ['superadmin', 'admin', 'user'] },
+        tenantId: { type: 'string', maxLength: 200 },
+      },
+      additionalProperties: false,
+    },
+  } as const;
+
+  const userUpdateSchema = {
+    body: {
+      type: 'object',
+      minProperties: 1,
+      properties: {
+        role: { enum: ['superadmin', 'admin', 'user'] },
+        tenantId: { type: ['string', 'null'] },
+        isActive: { type: 'boolean' },
+        password: {
+          type: 'string',
+          minLength: LOCAL_MIN_PASSWORD_LENGTH,
+          maxLength: 512,
+        },
+      },
+      additionalProperties: false,
+    },
+  } as const;
+
+  function requireUsers() {
+    if (!options.users) {
+      throw new NotFoundError('User management is disabled');
+    }
+    return options.users;
+  }
+
+  app.get('/api/users', async (request, reply) => {
+    try {
+      return { users: await requireUsers().listUsers(getAuth(request)) };
+    } catch (err) {
+      reply
+        .code(err instanceof ForbiddenError ? 403 : 404)
+        .send({ error: (err as Error).message });
+    }
+  });
+
+  app.post('/api/users', { schema: userSchema }, async (request, reply) => {
+    const body = request.body as {
+      username: string;
+      password: string;
+      role: AuthContext['role'];
+      tenantId?: string;
+    };
+    try {
+      const user = await requireUsers().createUser(getAuth(request), {
+        username: body.username,
+        password: body.password,
+        role: body.role,
+        tenantId: body.tenantId ?? null,
+      });
+      reply.code(201).send(user);
+    } catch (err) {
+      reply
+        .code(
+          err instanceof ForbiddenError
+            ? 403
+            : err instanceof ValidationError
+              ? 400
+              : 404,
+        )
+        .send({ error: (err as Error).message });
+    }
+  });
+
+  app.patch('/api/users/:id', { schema: userUpdateSchema }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const body = request.body as {
+      role?: AuthContext['role'];
+      tenantId?: string | null;
+      isActive?: boolean;
+      password?: string;
+    };
+    try {
+      return await requireUsers().updateUser(getAuth(request), id, body);
+    } catch (err) {
+      reply
+        .code(
+          err instanceof NotFoundError
+            ? 404
+            : err instanceof ValidationError
+              ? 400
+              : 403,
+        )
+        .send({ error: (err as Error).message });
+    }
+  });
+
+  app.delete('/api/users/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    try {
+      return await requireUsers().deactivateUser(getAuth(request), id);
+    } catch (err) {
+      reply
+        .code(err instanceof NotFoundError ? 404 : 403)
+        .send({ error: (err as Error).message });
+    }
   });
 
   app.get('/api/audit', async (request) => {

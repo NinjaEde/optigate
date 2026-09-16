@@ -23,13 +23,21 @@ services:
     environment:
       NODE_ENV: development
       PORT: 8100
-      AUTH_MODE: dev
+      # dev = header identity (no login) · local = username/password login
+      # (needs LOCAL_JWT_SECRET + bootstrap admin, see .env.example)
+      AUTH_MODE: ${AUTH_MODE:-dev}
       APPROVAL_REQUIRED: 'false'
       DATABASE_URL: postgres://optigate:optigate@db:5432/mcp_registry
       CHOKIDAR_USEPOLLING: 'true'
       SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:-dev-only-secret-key}
       SSRF_ALLOWED_HOSTS: ${SSRF_ALLOWED_HOSTS}
       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3030,http://localhost:5173}
+      # ── Local auth (only evaluated when AUTH_MODE=local) ──────────────
+      LOCAL_JWT_SECRET: ${LOCAL_JWT_SECRET:-}
+      LOCAL_JWT_TTL: ${LOCAL_JWT_TTL:-12h}
+      LOCAL_BOOTSTRAP_ADMIN_USER: ${LOCAL_BOOTSTRAP_ADMIN_USER:-}
+      LOCAL_BOOTSTRAP_ADMIN_PASSWORD: ${LOCAL_BOOTSTRAP_ADMIN_PASSWORD:-}
+      LOCAL_BOOTSTRAP_ADMIN_TENANT: ${LOCAL_BOOTSTRAP_ADMIN_TENANT:-}
     volumes:
       - ./server:/app/server
       - ./tsconfig.base.json:/app/tsconfig.base.json

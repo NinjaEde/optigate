@@ -115,6 +115,9 @@ export interface AuditEvent {
     | 'tool.called'
     | 'apikey.created'
     | 'apikey.revoked'
+    | 'user.created'
+    | 'user.updated'
+    | 'user.deactivated'
     | 'setting.changed';
   subjectId: string | null;
   detail: Record<string, unknown>;
@@ -134,8 +137,7 @@ export interface AuthContext {
 /**
  * Gateway API key record. Only the SHA-256 hash is stored — the plaintext
  * secret is shown exactly once at creation time and never again.
- */
-export interface ApiKey {
+ */export interface ApiKey {
   id: string;
   name: string;
   /** First characters of the secret (e.g. "og_abc123") for identification. */
@@ -157,3 +159,22 @@ export interface ApiKeyIdentity {
   role: AuthContext['role'];
   tenantId: string | null;
 }
+
+/**
+ * Local-mode user (AUTH_MODE=local). Passwords are stored as scrypt hashes
+ * only — plaintext never touches the database. `userId` in AuthContext maps
+ * to `LocalUser.id`; `username` is the human login name (unique, lowercase).
+ */
+export interface LocalUser {
+  id: string;
+  username: string;
+  passwordHash: string;
+  role: AuthContext['role'];
+  tenantId: string | null;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Public shape — explicit list so the password hash can never leak. */
+export type LocalUserPublic = Omit<LocalUser, 'passwordHash'>;

@@ -42,7 +42,7 @@ MCP Client ──▶ POST /mcp ──▶ OptiGate ──▶ managed MCP servers 
 | **MCP facade** | The registry itself is an MCP server: `search_tools` + `execute_tool` over stateless JSON‑RPC at `/mcp` |
 | **Multi‑transport** | Manages `streamable_http`, `sse`, and `stdio` servers |
 | **Governance** | Scopes (`global` / `tenant` / `private`), approval workflow, disable/enable, full audit trail |
-| **Auth** | Keycloak JWT (RS256/JWKS) in production, dev mode for local testing |
+| **Auth** | Keycloak JWT (RS256/JWKS) in production, local username/password login, dev mode for local testing |
 | **Self‑updating index** | Auto‑connects healthy servers on boot (3 retries each), keeps the tool index fresh on a loop with jitter |
 | **Per‑tenant credential bindings** | Shared servers connect with each tenant's own credentials; bindings persisted in Postgres |
 | **Args validation** | Tool arguments are validated against `inputSchema` before forwarding (required fields + type checks) |
@@ -210,13 +210,50 @@ Without these headers every dev request acts as the default superadmin in
 `dev-tenant`.
 
 > **Warning:** dev headers grant full identity control by design. Never run
-> `AUTH_MODE=dev` on a network‑exposed instance; use Keycloak mode instead.
+> `AUTH_MODE=dev` on a network‑exposed instance; use Keycloak or local mode instead.
+
+## Local authentication (`AUTH_MODE=local`)
+
+Username/password login without any external IdP — for home labs and small
+teams that don't run Keycloak. Passwords are stored as scrypt hashes
+(`local_users` table in Postgres, in-memory otherwise); sessions are
+self-signed HS256 JWTs.
+
+```bash
+# .env
+AUTH_MODE=local
+LOCAL_JWT_SECRET=<min-32-chars-secret>
+LOCAL_BOOTSTRAP_ADMIN_USER=admin
+LOCAL_BOOTSTRAP_ADMIN_PASSWORD=<min-10-chars>
+```
+
+On first boot with an empty user table, the bootstrap superadmin is created
+once. Afterwards sign in via the UI login form (or `POST /auth/login`) and
+manage the rest in the **Benutzer** view (`GET/POST/PATCH/DELETE
+/api/users`) — admins manage their own tenant only, superadmins manage all.
+There is no self-signup. Deactivated users lose access immediately, including
+already-issued tokens (checked against the user record on every request).
+
+```bash
+# Login from the shell
+curl -X POST http://localhost:8100/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"..."}'
+# → {"token":"...","expiresAt":"...","user":{...}}
+
+curl http://localhost:8100/api/servers \
+  -H "Authorization: Bearer <token>"
+```
 
 ## Configuration
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `AUTH_MODE` | `keycloak` | `dev` = header‑based identity, no token required |
+| `AUTH_MODE` | `keycloak` | `dev` = header‑based identity, no token required · `local` = username/password login, no Keycloak · `keycloak` = RS256/JWKS bearer verification |
+| `LOCAL_JWT_SECRET` | – | **Required in local mode** — HS256 signing secret for session JWTs (min 32 chars) |
+| `LOCAL_JWT_TTL` | `12h` | Local session lifetime (`12h`, `30m`, `7d`, `900s` or ms) |
+| `LOCAL_BOOTSTRAP_ADMIN_USER` / `LOCAL_BOOTSTRAP_ADMIN_PASSWORD` | – | First superadmin, created once when the user table is empty (password min 10 chars) |
+| `LOCAL_BOOTSTRAP_ADMIN_TENANT` | – | Optional tenant for the bootstrap admin (empty = platform-wide) |
 | `DATABASE_URL` | – | Postgres connection; unset = in‑memory repository |
 | `APPROVAL_REQUIRED` | `true` | New servers start as `pending_approval` |
 | `PORT` | `8100` | API listen port |
