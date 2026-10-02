@@ -5,6 +5,9 @@ hero:
   name: OptiGate
   text: Self-hosted MCP gateway with token-sparing tool retrieval
   tagline: One endpoint for all your MCP servers. Clients retrieve only the LLM tools they actually need — optionally reranked by a decision model.
+  image:
+    src: /screenshot.png
+    alt: OptiGate admin UI with server cards and tool search
   actions:
     - theme: brand
       text: Get started
