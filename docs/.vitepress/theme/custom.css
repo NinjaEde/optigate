@@ -1,0 +1,17 @@
+/* Let the hero screenshot fill the available space instead of the
+ * theme's narrow default image column. */
+
+.VPHero.has-image .image,
+.VPHero.has-image .image-container {
+  width: 100%;
+  max-width: 100%;
+}
+
+.VPHero .image-src {
+  width: 100%;
+  max-width: 100%;
+  max-height: none;
+  border-radius: 12px;
+  border: 1px solid var(--vp-c-divider);
+  box-shadow: 0 12px 40px rgb(0 0 0 / 0.35);
+}
