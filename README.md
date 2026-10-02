@@ -1,4 +1,4 @@
-# OptiGate
+# OptiGate — Self-Hosted MCP Gateway with Token-Sparing Tool Retrieval
 
 [![MIT License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
@@ -8,16 +8,17 @@
 [![NinjaEde/optigate MCP server](https://glama.ai/mcp/servers/NinjaEde/optigate/badges/score.svg)](https://glama.ai/mcp/servers/NinjaEde/optigate)
 [![Buy me a coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-ffdd00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/ninjaede)
 
-**Your optimized MCP gateway.** One endpoint for all your MCP servers — with
-token-sparing tool retrieval built in.
-Optional: with **descition-model based reranking**
+**Your optimized, self-hosted MCP gateway.** One endpoint for all your MCP
+servers — with token-sparing tool retrieval built in.
+Optional: with **decision-model based reranking**.
 
-OptiGate is an MCP server registry and gateway. It manages your MCP servers
-(registration, health, approval workflow, audit, per‑tenant credential
-isolation) and exposes them to any MCP client through a single Streamable
-HTTP endpoint. Instead of loading hundreds of tool schemas into the LLM
-context, clients query two meta‑tools and retrieve only the tools they
-actually need.
+OptiGate is a self-hosted MCP (Model Context Protocol) server registry and
+gateway for LLM tools. It manages your MCP servers (registration, health,
+approval workflow, audit, per‑tenant credential isolation) and exposes them
+to any MCP client — Claude, ChatGPT, Hermes, coding agents — through a
+single Streamable HTTP endpoint. Instead of loading hundreds of tool schemas
+into the LLM context, clients query two meta‑tools and retrieve only the
+tools they actually need.
 
 ```
 MCP Client ──▶ POST /mcp ──▶ OptiGate ──▶ managed MCP servers (HTTP/SSE/stdio)
@@ -26,14 +27,27 @@ MCP Client ──▶ POST /mcp ──▶ OptiGate ──▶ managed MCP servers 
 
 ## Why
 
-- **Token explosion** — dozens of MCP servers with hundreds of tools don't fit
-  into a context window. OptiGate's retrieval returns the top‑k relevant tools
-  per query (~200–800 tokens regardless of registry size).
+- **Token explosion** — dozens of MCP servers with hundreds of LLM tools don't
+  fit into a context window. OptiGate's token-sparing retrieval returns the
+  top‑k relevant tools per query (~200–800 tokens regardless of registry
+  size), cutting LLM context usage and token costs.
 - **No governance** — who may register which server? Which tool was called
   when, by whom, with what arguments? OptiGate ships roles, approval workflow,
   full audit log, and per‑tenant credential isolation.
-- **N+1 client configuration** — without a gateway, every client needs every
-  server registered individually. With OptiGate, one entry covers them all.
+- **N+1 client configuration** — without an MCP gateway, every client needs
+  every server registered individually. With OptiGate, one entry covers them all.
+- **Cloud lock‑in** — OptiGate is fully self-hosted (Docker Compose, MIT
+  licensed): your tool traffic, credentials, and audit data stay on your own
+  infrastructure — homelab, VPS, or on‑prem.
+
+## Who is it for
+
+- **AI agent builders** connecting Claude, GPT, or open‑weights models to
+  self-hosted LLM tools without blowing the context window.
+- **Homelabs & small teams** running private MCP servers (files, media,
+  smart home, scrapers) behind one governed MCP gateway.
+- **Platform teams** needing multi‑tenant tool access with audit trails,
+  approval gates, and per‑tenant credentials.
 
 ## Features
 
@@ -42,6 +56,7 @@ MCP Client ──▶ POST /mcp ──▶ OptiGate ──▶ managed MCP servers 
 | **Token‑sparing retrieval** | `search_tools(query, k)` returns the k most relevant tool cards across all managed servers |
 | **Decision‑model reranking** | Optional `mode="decision"`: a decision model (Jev via OpenRouter, or any OpenAI‑compatible endpoint) semantically reranks the candidates and may report "no matching tool" |
 | **MCP facade** | The registry itself is an MCP server: `search_tools` + `execute_tool` over stateless JSON‑RPC at `/mcp` |
+| **Self‑hosted & Docker‑ready** | MIT licensed, runs anywhere with Docker Compose — your LLM tools and credentials never leave your infrastructure |
 | **Multi‑transport** | Manages `streamable_http`, `sse`, and `stdio` servers |
 | **Governance** | Scopes (`global` / `tenant` / `private`), approval workflow, disable/enable, full audit trail |
 | **Auth** | Keycloak JWT (RS256/JWKS) in production, local username/password login, dev mode for local testing |
@@ -139,6 +154,8 @@ same tenant sees:
 ```
 
 ## How the token saving works
+
+OptiGate's token-sparing retrieval keeps LLM context usage flat:
 
 1. `search_tools("chart", k=5)` → lexically scored tool cards (name,
    description, input schema) across all indexed servers.
@@ -377,3 +394,6 @@ If this project saves you time or helps your agents work better, you can
 support it here:
 
 [☕ Buy me a coffee](https://buymeacoffee.com/ninjaede)
+
+---
+*MCP gateway · Model Context Protocol registry · token-sparing tool retrieval · self-hosted LLM tools · LLM tool router · AI agent tooling · reduce LLM context usage and token costs*
