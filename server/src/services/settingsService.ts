@@ -1,9 +1,21 @@
 import type { AuthContext } from '../domain/types.js';
+import {
+  decryptSecret,
+  encryptSecret,
+  isEncryptedSecret,
+} from '../infra/secrets/secretVault.js';
 import type { AuditSink } from './registryService.js';
 import { ForbiddenError, NotFoundError, ValidationError } from './errors.js';
 
-export type SettingType = 'string' | 'number' | 'boolean';
+export type SettingType = 'string' | 'number' | 'boolean' | 'secret';
 export type SettingSource = 'db' | 'env' | 'default';
+
+/**
+ * Placeholder returned by list()/set() for secret settings. Plaintext
+ * values never leave the server.
+ * NOTE: mirrored in web/src/components/SettingsView.tsx — keep in sync.
+ */
+export const SECRET_MASK = '••••••••';
 
 export interface SettingDef {
   key: string;
@@ -140,6 +152,81 @@ export const SETTING_DEFS: SettingDef[] = [
     description:
       'Also allow loopback/private/link-local targets. Home-lab only: exposes internal networks to registered servers.',
   },
+  {
+    key: 'decisionModel.enabled',
+    type: 'boolean',
+    default: false,
+    env: 'DECISION_MODEL_ENABLED',
+    minRole: 'admin',
+    description:
+      'Enable the decision-model reranker for search_tools (mode="decision"). Opt-in per request.',
+  },
+  {
+    key: 'decisionModel.provider',
+    type: 'string',
+    default: 'openai-compatible',
+    env: 'DECISION_MODEL_PROVIDER',
+    minRole: 'admin',
+    description: "Decision model backend: 'openai-compatible' or 'jev'.",
+  },
+  {
+    key: 'decisionModel.baseUrl',
+    type: 'string',
+    default: '',
+    env: 'DECISION_MODEL_BASE_URL',
+    minRole: 'admin',
+    description:
+      'Decision model API base URL (e.g. https://api.openai.com/v1 or https://api.typesafe.ai). Required to activate.',
+  },
+  {
+    key: 'decisionModel.model',
+    type: 'string',
+    default: '',
+    env: 'DECISION_MODEL_MODEL',
+    minRole: 'admin',
+    description:
+      "Model id (e.g. gpt-4o-mini, jev-latest). Defaults to 'jev-latest' for the jev provider.",
+  },
+  {
+    key: 'decisionModel.apiKey',
+    type: 'secret',
+    default: '',
+    env: 'DECISION_MODEL_API_KEY',
+    minRole: 'admin',
+    description:
+      'API key for the decision model provider. Stored AES-256-GCM encrypted at rest; never returned in plaintext.',
+  },
+  {
+    key: 'decisionModel.timeoutMs',
+    type: 'number',
+    default: 3000,
+    env: 'DECISION_MODEL_TIMEOUT_MS',
+    minRole: 'admin',
+    min: 500,
+    max: 60000,
+    description:
+      'Timeout for decision-model calls. On timeout/error, lexical results are returned.',
+  },
+  {
+    key: 'decisionModel.candidatePool',
+    type: 'number',
+    default: 20,
+    env: 'DECISION_MODEL_CANDIDATE_POOL',
+    minRole: 'admin',
+    min: 2,
+    max: 50,
+    description:
+      'How many lexical candidates are handed to the decision model for reranking.',
+  },
+  {
+    key: 'decisionModel.forceWhenConfigured',
+    type: 'boolean',
+    default: false,
+    env: 'DECISION_MODEL_FORCE',
+    minRole: 'admin',
+    description:
+      'Force decision-model reranking for every search_tools call while a model is configured, regardless of the requested mode.',
+  },
 ];
 
 const DEFS = new Map(SETTING_DEFS.map((d) => [d.key, d]));
@@ -212,13 +299,26 @@ export class SettingsService {
     const stored = await this.store.get(key);
     let effective: unknown;
     if (stored !== undefined) {
-      effective = stored;
+      effective =
+        def.type === 'secret' ? this.decryptStored(stored) : stored;
     } else {
       const fromEnv = parseEnv(def, process.env[def.env ?? '']);
       effective = fromEnv.found ? fromEnv.value : def.default;
     }
     this.cache.set(key, { value: effective, at: now });
     return effective as T;
+  }
+
+  /** Encrypted DB values are decrypted for internal consumption only. */
+  private decryptStored(stored: unknown): string {
+    if (
+      typeof stored === 'string' &&
+      isEncryptedSecret(stored)
+    ) {
+      return decryptSecret(stored) ?? '';
+    }
+    // fail closed: plaintext or undecryptable values are never served
+    return '';
   }
 
   /**
@@ -269,14 +369,25 @@ export class SettingsService {
     const def = this.def(key);
     this.assertMayWrite(auth, def);
     const checked = this.checkValue(def, value);
-    await this.store.set(key, checked, auth.userId);
+    let toStore: unknown = checked;
+    if (def.type === 'secret') {
+      const enc = encryptSecret(checked as string);
+      if (!enc) {
+        throw new ValidationError(
+          'SECRET_ENCRYPTION_KEY (min 32 chars) is required to store secret settings',
+        );
+      }
+      toStore = enc;
+    }
+    await this.store.set(key, toStore, auth.userId);
     this.cache.set(key, { value: checked, at: Date.now() });
     await this.audit?.record({
       actorId: auth.userId,
       tenantId: auth.tenantId,
       action: 'setting.changed',
       subjectId: key,
-      detail: { value: checked },
+      // secrets never reach the audit log in plaintext
+      detail: { value: def.type === 'secret' ? SECRET_MASK : checked },
     });
     return this.view(def, checked, 'db');
   }
@@ -316,9 +427,23 @@ export class SettingsService {
     def: SettingDef,
     value: unknown,
   ): string | number | boolean {
-    if (def.type === 'string') {
+    if (def.type === 'string' || def.type === 'secret') {
       if (typeof value !== 'string') {
         throw new ValidationError(`Setting "${def.key}" must be a string`);
+      }
+      if (def.type === 'secret') {
+        const trimmed = value.trim();
+        if (!trimmed) {
+          throw new ValidationError(
+            `Setting "${def.key}" must be a non-empty value`,
+          );
+        }
+        if (trimmed === SECRET_MASK) {
+          throw new ValidationError(
+            `Setting "${def.key}": submit a new secret value to replace the stored one`,
+          );
+        }
+        return trimmed;
       }
       return value;
     }
@@ -345,10 +470,14 @@ export class SettingsService {
     value: string | number | boolean | unknown,
     source: SettingSource,
   ): SettingView {
+    const isSet =
+      def.type === 'secret' &&
+      typeof value === 'string' &&
+      value.length > 0;
     return {
       key: def.key,
       type: def.type,
-      value: value as string | number | boolean,
+      value: (isSet ? SECRET_MASK : value) as string | number | boolean,
       source,
       minRole: def.minRole,
       ...(def.min !== undefined ? { min: def.min } : {}),

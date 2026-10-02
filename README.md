@@ -10,6 +10,7 @@
 
 **Your optimized MCP gateway.** One endpoint for all your MCP servers — with
 token-sparing tool retrieval built in.
+Optional: with **descition-model based reranking**
 
 OptiGate is an MCP server registry and gateway. It manages your MCP servers
 (registration, health, approval workflow, audit, per‑tenant credential
@@ -39,6 +40,7 @@ MCP Client ──▶ POST /mcp ──▶ OptiGate ──▶ managed MCP servers 
 | | |
 |---|---|
 | **Token‑sparing retrieval** | `search_tools(query, k)` returns the k most relevant tool cards across all managed servers |
+| **Decision‑model reranking** | Optional `mode="decision"`: a decision model (Jev via OpenRouter, or any OpenAI‑compatible endpoint) semantically reranks the candidates and may report "no matching tool" |
 | **MCP facade** | The registry itself is an MCP server: `search_tools` + `execute_tool` over stateless JSON‑RPC at `/mcp` |
 | **Multi‑transport** | Manages `streamable_http`, `sse`, and `stdio` servers |
 | **Governance** | Scopes (`global` / `tenant` / `private`), approval workflow, disable/enable, full audit trail |
@@ -147,6 +149,62 @@ same tenant sees:
 Context cost stays constant no matter whether you manage 20 or 2,000 tools.
 The web UI has a **Tool Search** view that runs the exact same retrieval path,
 so you can inspect what agents would see.
+
+## Decision‑model reranking (`mode="decision"`)
+
+Lexical search is fast but misses paraphrases ("download web page" vs. a tool
+named `http_fetch`). Opt‑in per request, `search_tools` can hand its candidate
+pool to a **decision model** that reranks semantically — and may honestly
+report "no matching tool" instead of guessing:
+
+```json
+// tools/call search_tools
+{ "query": "download web page", "k": 5, "mode": "decision" }
+```
+
+Two backends are supported through one provider‑agnostic interface:
+
+| Provider | Endpoint | Notes |
+|---|---|---|
+| `jev` | TypeSafe AI System One (`Choice` primitive with per‑option probabilities + confidence) | Via OpenRouter (`https://openrouter.ai/api/v1`, model `typesafe/jev-1.13`) or first‑party (`https://api.typesafe.ai`) |
+| `openai-compatible` | Any chat‑completions endpoint (OpenAI, Ollama, OmniRoute, …) | Temperature 0, JSON output, strictly validated against the candidate set |
+
+Behavioral guarantees:
+
+- **Reranker, never retriever** — lexical search builds the candidate pool
+  (`decisionModel.candidatePool`, default 20); the model only re‑orders it.
+- **"None" is a first‑class answer** — with `none` the response is empty plus a
+  confidence score, so agents can rephrase instead of calling the wrong tool.
+- **Fail‑safe** — timeout, error, or invalid model output falls back to lexical
+  results; the second content block always reports
+  `{used, provider, fallback, latencyMs, …}`.
+- **Injection‑safe** — the model selects only from supplied candidate keys
+  (re‑validated server‑side); tool descriptions are treated as untrusted data
+  and the model never executes anything (`execute_tool` is unchanged).
+
+```bash
+# .env — OpenRouter (key at https://openrouter.ai/settings/keys)
+DECISION_MODEL_ENABLED=true
+DECISION_MODEL_PROVIDER=jev
+DECISION_MODEL_BASE_URL=https://openrouter.ai/api/v1
+DECISION_MODEL_MODEL=typesafe/jev-1.13
+DECISION_MODEL_API_KEY=<key>
+DECISION_MODEL_TIMEOUT_MS=3000
+DECISION_MODEL_CANDIDATE_POOL=20
+```
+
+The API key can also be stored at runtime in the UI's **Settings** view
+(`decisionModel.apiKey`): it is AES‑256‑GCM encrypted at rest and never
+returned in plaintext. Precedence for all `decisionModel.*` settings:
+database value > environment variable > built‑in default.
+
+**Forcing reranking server-side:** by default the LLM opts in per call via
+`mode="decision"`. Set `decisionModel.forceWhenConfigured=true`
+(`DECISION_MODEL_FORCE=true`) and every `search_tools` call — gateway and
+REST alike — is reranked once a model is configured, no matter which mode
+was requested. Forced responses carry `"forced": true` in the decision
+metadata, so callers can always tell what happened. Note the cost implication:
+every search then pays model tokens + latency.
 
 ## Multi‑tenancy & user separation
 
@@ -268,6 +326,13 @@ curl http://localhost:8100/api/servers \
 | `SEARCH_DEFAULT_LIMIT` / `SEARCH_MAX_LIMIT` | `5` / `20` | Tool retrieval top‑k bounds (also as `search.*` settings) |
 | `AUDIT_LIMIT` | `100` | Audit feed length (also as `audit.limit` setting) |
 | `GATEWAY_DISPATCH_TIMEOUT_MS` | `30000` | Per‑request timeout of the `/mcp` gateway (also as `gateway.dispatchTimeoutMs` setting) |
+| `DECISION_MODEL_ENABLED` | `false` | Opt‑in switch for `search_tools` `mode="decision"` (also as `decisionModel.enabled` setting) |
+| `DECISION_MODEL_PROVIDER` | `openai-compatible` | `jev` (TypeSafe System One) or `openai-compatible` chat‑completions endpoint |
+| `DECISION_MODEL_BASE_URL` | – | Provider base URL, e.g. `https://openrouter.ai/api/v1` or `https://api.typesafe.ai` |
+| `DECISION_MODEL_MODEL` | – | Model id, e.g. `typesafe/jev-1.13` (pinned; default `jev-latest` for the `jev` provider) |
+| `DECISION_MODEL_API_KEY` | – | Provider API key — store via Settings view to keep it AES‑256‑GCM encrypted at rest |
+| `DECISION_MODEL_TIMEOUT_MS` / `DECISION_MODEL_CANDIDATE_POOL` | `3000` / `20` | Model call timeout and lexical candidate pool size for reranking |
+| `DECISION_MODEL_FORCE` | `false` | Force reranking for every `search_tools` call once a model is configured (also as `decisionModel.forceWhenConfigured` setting) |
 | `CORS_ORIGIN` | all origins | Comma‑separated allowed CORS origins for the API |
 | `MAX_CONNS_PER_SERVER` | `20` | Max simultaneous connections per upstream MCP server (also as `pool.maxConnsPerServer` setting) |
 

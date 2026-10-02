@@ -9,6 +9,11 @@ import type {
   MCPServer,
   ToolMeta,
 } from '../../domain/types.js';
+import type { DecisionModel } from '../../domain/toolDecision.js';
+import {
+  searchWithDecision,
+  type ScoredTool,
+} from '../decision/decisionSearch.js';
 
 /** Shape of the tool index the gateway needs — mirrors app.ts's provider. */
 export interface ToolIndexProvider {
@@ -16,6 +21,13 @@ export interface ToolIndexProvider {
     auth: AuthContext,
     servers: MCPServer[],
   ): Promise<Array<ToolMeta & { serverName: string }>>;
+}
+
+/** Resolved per-request decision model (null = disabled/not configured). */
+export interface ResolvedDecision {
+  model: DecisionModel;
+  /** Retrieval depth handed to the model for reranking. */
+  candidatePool: number;
 }
 
 export interface GatewayOptions {
@@ -38,6 +50,17 @@ export interface GatewayOptions {
   ):
     | Array<ToolMeta & { serverName: string; score: number }>
     | Promise<Array<ToolMeta & { serverName: string; score: number }>>;
+  /**
+   * Optional decision-model reranker. Called per request so runtime
+   * settings changes apply immediately; null disables decision mode.
+   */
+  resolveDecision?: () => Promise<ResolvedDecision | null>;
+  /**
+   * Force decision-model reranking for every search_tools call while a
+   * model is configured, regardless of the requested mode. Getter
+   * allowed. Default: false.
+   */
+  decisionForce?: boolean | (() => boolean);
   callTool(
     server: MCPServer,
     auth: AuthContext,
@@ -65,8 +88,12 @@ const SERVER_INFO = { name: 'optigate', version: pkg.version as string };
  * MCP facade ("aggregator") for the registry: exposes all visible registry
  * servers as exactly two meta tools:
  *
- *   search_tools(query, k)                → top-k tool cards across servers
+ *   search_tools(query, k, mode?)         → top-k tool cards across servers
  *   execute_tool(server_id, tool_name, args)
+ *
+ * search_tools supports an optional mode="decision": a decision-model
+ * reranker (Jev / OpenAI-compatible) reorders the lexical candidate pool
+ * and may report "no matching tool". Opt-in and fully fallback-safe.
  *
  * Stateless JSON mode over HTTP POST: every request is self-contained and
  * gets its own in-memory MCP session, which is torn down afterwards. That
@@ -86,6 +113,53 @@ export function createMcpGateway(options: GatewayOptions) {
   const registerTools = (server: McpServer, auth: AuthContext) => {
     const defaultLimit = resolveLimit(options.searchDefaultLimit, 5);
     const maxLimit = resolveLimit(options.searchMaxLimit, 20);
+
+    const toCard = (r: ScoredTool) => ({
+      server_id: r.serverId,
+      server: r.serverName,
+      tool: r.name,
+      description: r.description,
+      inputSchema: r.inputSchema,
+      score: r.score,
+      ...(r.lexicalScore !== undefined ? { lexicalScore: r.lexicalScore } : {}),
+    });
+
+    const textBlock = (value: unknown) => ({
+      type: 'text' as const,
+      text: JSON.stringify(value, null, 2),
+    });
+
+    /**
+     * Decision mode: shared two-stage search (lexical pool → model
+     * rerank / "no match"), with any model failure falling back to
+     * plain lexical results flagged in the metadata block.
+     */
+    const runDecisionSearch = async (
+      index: Array<ToolMeta & { serverName: string }>,
+      query: string,
+      limit: number,
+      forced: boolean,
+    ) => {
+      const { tools, meta } = await searchWithDecision(
+        index,
+        query,
+        limit,
+        options.searchTools,
+        options.resolveDecision,
+      );
+      return {
+        content: [
+          textBlock(tools.map(toCard)),
+          textBlock(forced ? { ...meta, forced: true } : meta),
+        ],
+      };
+    };
+
+    const isForceEnabled = (): boolean =>
+      typeof options.decisionForce === 'function'
+        ? options.decisionForce()
+        : (options.decisionForce ?? false);
+
     server.registerTool(
       'search_tools',
       {
@@ -93,40 +167,35 @@ export function createMcpGateway(options: GatewayOptions) {
         description:
           'Durchsucht alle freigegebenen MCP-Server der Registry und liefert '
           + 'die k relevantesten Tools mit Server-Zuordnung (token-sparend). '
-          + 'Nutze dieses Tool vor execute_tool.',
+          + 'Nutze dieses Tool vor execute_tool. Optional mode="decision": '
+          + 'ein Decision Model rerankt die Kandidaten semantisch und kann '
+          + 'auch "kein passendes Tool" melden. Der Server kann das Reranking '
+          + 'zudem serverseitig forcieren (siehe Meta-Block im Ergebnis).',
         inputSchema: {
           query: z.string().describe('Freitext-Suche über Namen/Beschreibungen'),
           k: z.number().int().min(1).max(maxLimit).default(defaultLimit).optional(),
+          mode: z
+            .enum(['lexical', 'decision'])
+            .default('lexical')
+            .optional()
+            .describe(
+              'lexical: schnelle Stichwortsuche (Default). decision: '
+                + 'semantisches Reranking per Decision Model, sofern aktiviert.',
+            ),
         },
       },
-      async ({ query, k }) => {
+      async ({ query, k, mode }) => {
         const servers = await options.listVisibleServers(auth);
         const index = await options.buildToolIndex(auth, servers);
-        const results = await options.searchTools(
-          index,
-          query ?? '',
-          Math.min(k ?? defaultLimit, maxLimit),
-        );
+        const limit = Math.min(k ?? defaultLimit, maxLimit);
+        const forced = mode !== 'decision' && isForceEnabled();
 
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(
-                results.map((r) => ({
-                  server_id: r.serverId,
-                  server: r.serverName,
-                  tool: r.name,
-                  description: r.description,
-                  inputSchema: r.inputSchema,
-                  score: r.score,
-                })),
-                null,
-                2,
-              ),
-            },
-          ],
-        };
+        if (mode !== 'decision' && !forced) {
+          const results = await options.searchTools(index, query ?? '', limit);
+          return { content: [textBlock(results.map(toCard))] };
+        }
+
+        return runDecisionSearch(index, query ?? '', limit, forced);
       },
     );
 

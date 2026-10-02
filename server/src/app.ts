@@ -11,6 +11,11 @@ import type { McpClientPool } from './infra/mcp/clientPool.js';
 import { encryptSecret } from './infra/secrets/secretVault.js';
 import { sanitizeAuthForClient } from './infra/mcp/authHeaders.js';
 import { createMcpGateway } from './infra/mcp/gateway.js';
+import { createOpenAiCompatibleDecisionModel } from './infra/decision/openaiCompatible.js';
+import { createJevDecisionModel } from './infra/decision/jev.js';
+import { withDecisionCache } from './infra/decision/cache.js';
+import { searchWithDecision } from './infra/decision/decisionSearch.js';
+import type { DecisionModel } from './domain/toolDecision.js';
 import { ToolIndexReconciler } from './infra/mcp/toolIndexReconciler.js';
 import type { ICredentialResolver } from './infra/mcp/credentialResolver.js';
 import type { ApiKeyService } from './services/apiKeyService.js';
@@ -636,11 +641,19 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     return toolsByServer.get(id) ?? [];
   });
 
-  app.post('/api/tools/search', async (request) => {
-    const { query, limit } = (request.body ?? {}) as {
+  app.post('/api/tools/search', async (request, reply) => {
+    const { query, limit, mode } = (request.body ?? {}) as {
       query?: string;
       limit?: number;
+      mode?: string;
     };
+
+    // Same contract as the gateway's search_tools meta-tool: unknown modes
+    // are rejected instead of silently reinterpreted.
+    if (mode !== undefined && mode !== 'lexical' && mode !== 'decision') {
+      reply.code(400).send({ error: 'mode must be "lexical" or "decision"' });
+      return;
+    }
 
     const provider = async (): Promise<Array<ToolMeta & { serverName: string }>> => {
       const servers = await registry.listServersFor(getAuth(request));
@@ -656,14 +669,38 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     };
 
     const maxLimit = settings.getCached<number>('search.maxLimit');
+    const capped = Math.min(
+      limit ?? settings.getCached<number>('search.defaultLimit'),
+      maxLimit,
+    );
+
+    // Same two-stage path as the gateway's search_tools meta-tool:
+    // lexical candidate pool → decision-model rerank (opt-in per request,
+    // or forced server-side while a model is configured).
+    const forced =
+      mode !== 'decision' &&
+      settings.getCached<boolean>('decisionModel.forceWhenConfigured');
+    if (mode === 'decision' || forced) {
+      const index = await provider();
+      const { tools, meta } = await searchWithDecision(
+        index,
+        query ?? '',
+        capped,
+        (all, q, n) =>
+          registry.searchToolsFor(getAuth(request), q, n, async () => all),
+        resolveDecisionModel,
+      );
+      return { tools, decision: forced ? { ...meta, forced: true } : meta };
+    }
+
     const tools = await registry.searchToolsFor(
       getAuth(request),
       query ?? '',
-      Math.min(limit ?? settings.getCached<number>('search.defaultLimit'), maxLimit),
+      capped,
       provider,
     );
 
-    return { tools };
+    return { tools, decision: null };
   });
 
   app.post('/api/tools/execute', async (request, reply) => {
@@ -1129,6 +1166,85 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     return all;
   };
 
+  /**
+   * Builds the decision-model reranker from runtime settings on every
+   * request: disabled/not configured → null (gateway falls back to
+   * lexical).
+   *
+   * The TTL/LRU wrapper is hoisted to app scope so repeat queries
+   * actually hit the cache. It is rebuilt whenever the effective config
+   * changes (fingerprint covers endpoint, model, credentials and limits),
+   * so key rotations or URL swaps never serve stale decisions.
+   */
+  let cachedDecision: {
+    fingerprint: string;
+    model: DecisionModel;
+    candidatePool: number;
+  } | null = null;
+
+  const resolveDecisionModel = async () => {
+    const [enabled, provider, baseUrl, modelId, apiKey, timeoutMs, candidatePool] =
+      await Promise.all([
+        settings.get<boolean>('decisionModel.enabled'),
+        settings.get<string>('decisionModel.provider'),
+        settings.get<string>('decisionModel.baseUrl'),
+        settings.get<string>('decisionModel.model'),
+        settings.get<string>('decisionModel.apiKey'),
+        settings.get<number>('decisionModel.timeoutMs'),
+        settings.get<number>('decisionModel.candidatePool'),
+      ]);
+    if (!enabled) {
+      cachedDecision = null;
+      return null;
+    }
+
+    if (
+      (provider !== 'openai-compatible' && provider !== 'jev')
+      || !baseUrl
+      || (!modelId && provider !== 'jev')
+    ) {
+      return null;
+    }
+
+    const effectiveModel = modelId || 'jev-latest';
+    const effectiveTimeout =
+      Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 3000;
+    const effectivePool =
+      Number.isFinite(candidatePool) && candidatePool >= 2
+        ? Math.floor(candidatePool)
+        : 20;
+    const fingerprint = JSON.stringify({
+      provider,
+      baseUrl,
+      model: effectiveModel,
+      apiKey: apiKey || '',
+      timeoutMs: effectiveTimeout,
+      candidatePool: effectivePool,
+    });
+
+    if (cachedDecision && cachedDecision.fingerprint === fingerprint) {
+      return {
+        model: cachedDecision.model,
+        candidatePool: cachedDecision.candidatePool,
+      };
+    }
+
+    const config = {
+      baseUrl,
+      model: effectiveModel,
+      apiKey: apiKey || undefined,
+      timeoutMs: effectiveTimeout,
+    };
+    const model: DecisionModel =
+      provider === 'jev'
+        ? createJevDecisionModel(config)
+        : createOpenAiCompatibleDecisionModel(config);
+
+    const cached = withDecisionCache(model);
+    cachedDecision = { fingerprint, model: cached, candidatePool: effectivePool };
+    return { model: cached, candidatePool: effectivePool };
+  };
+
   const gateway = createMcpGateway({
     resolveAuth: (request) => options.auth.resolveAuth(request),
     dispatchTimeoutMs: () => settings.getCached<number>('gateway.dispatchTimeoutMs'),
@@ -1136,6 +1252,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     searchMaxLimit: () => settings.getCached<number>('search.maxLimit'),
     listVisibleServers: (auth) => registry.listServersFor(auth),
     buildToolIndex: buildGatewayToolIndex,
+    resolveDecision: resolveDecisionModel,
+    decisionForce: () => settings.getCached<boolean>('decisionModel.forceWhenConfigured'),
     searchTools: async (tools, query, limit) => {
       const { searchTools } = await import('./domain/toolSearch.js');
       return searchTools(tools, query, limit);

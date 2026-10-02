@@ -142,4 +142,74 @@ describe('SettingsService', () => {
     await svc.reset(SUPER, 'ratelimit.max');
     expect(svc.getCached<number>('ratelimit.max')).toBe(500);
   });
+
+  describe('secret settings', () => {
+    beforeEach(() => {
+      clearEnv(['DECISION_MODEL_API_KEY']);
+    });
+
+    it('stores encrypted at rest and decrypts for internal reads', async () => {
+      setEnv({ SECRET_ENCRYPTION_KEY: 'test-encryption-key-0123456789abcdef' });
+      const svc2 = makeService();
+
+      await svc2.set(SUPER, 'decisionModel.apiKey', ' sk-super-secret ');
+      expect(await svc2.get<string>('decisionModel.apiKey')).toBe('sk-super-secret');
+
+      const view = (await svc2.list()).find((s) => s.key === 'decisionModel.apiKey');
+      expect(view?.type).toBe('secret');
+      expect(view?.value).toBe('••••••••');
+      expect(view?.source).toBe('db');
+    });
+
+    it('rejects plaintext storage without SECRET_ENCRYPTION_KEY', async () => {
+      delete process.env.SECRET_ENCRYPTION_KEY;
+      const svc2 = makeService();
+      await expect(
+        svc2.set(SUPER, 'decisionModel.apiKey', 'sk-secret'),
+      ).rejects.toThrow(ValidationError);
+    });
+
+    it('rejects empty values and the masked placeholder', async () => {
+      setEnv({ SECRET_ENCRYPTION_KEY: 'test-encryption-key-0123456789abcdef' });
+      const svc2 = makeService();
+
+      await expect(svc2.set(SUPER, 'decisionModel.apiKey', '')).rejects.toThrow(ValidationError);
+      await expect(
+        svc2.set(SUPER, 'decisionModel.apiKey', '••••••••'),
+      ).rejects.toThrow(ValidationError);
+    });
+
+    it('rejects non-string values', async () => {
+      setEnv({ SECRET_ENCRYPTION_KEY: 'test-encryption-key-0123456789abcdef' });
+      const svc2 = makeService();
+      await expect(svc2.set(SUPER, 'decisionModel.apiKey', 42)).rejects.toThrow(ValidationError);
+    });
+
+    it('falls back to a plaintext env var when no DB override exists', async () => {
+      setEnv({ DECISION_MODEL_API_KEY: 'sk-from-env' });
+      const svc2 = makeService();
+      expect(await svc2.get<string>('decisionModel.apiKey')).toBe('sk-from-env');
+
+      const view = (await svc2.list()).find((s) => s.key === 'decisionModel.apiKey');
+      expect(view).toMatchObject({ value: '••••••••', source: 'env' });
+    });
+
+    it('reset falls back from encrypted DB value to default', async () => {
+      setEnv({ SECRET_ENCRYPTION_KEY: 'test-encryption-key-0123456789abcdef' });
+      const svc2 = makeService();
+      await svc2.set(SUPER, 'decisionModel.apiKey', 'sk-secret');
+      await svc2.reset(SUPER, 'decisionModel.apiKey');
+      expect(await svc2.get<string>('decisionModel.apiKey')).toBe('');
+    });
+
+    it('decision model settings exist with expected defaults', async () => {
+      const svc2 = makeService();
+      expect(await svc2.get<boolean>('decisionModel.enabled')).toBe(false);
+      expect(await svc2.get<string>('decisionModel.provider')).toBe('openai-compatible');
+      expect(await svc2.get<string>('decisionModel.baseUrl')).toBe('');
+      expect(await svc2.get<number>('decisionModel.timeoutMs')).toBe(3000);
+      expect(await svc2.get<number>('decisionModel.candidatePool')).toBe(20);
+      expect(await svc2.get<boolean>('decisionModel.forceWhenConfigured')).toBe(false);
+    });
+  });
 });

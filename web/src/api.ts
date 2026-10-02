@@ -80,7 +80,7 @@ export interface ApiKey {
 
 export interface Setting {
   key: string;
-  type: 'string' | 'number' | 'boolean';
+  type: 'string' | 'number' | 'boolean' | 'secret';
   value: string | number | boolean;
   source: 'db' | 'env' | 'default';
   minRole: 'superadmin' | 'admin';
@@ -251,14 +251,24 @@ export const api = {
       method: 'DELETE',
     }),
   /** Same retrieval path as the MCP facade's search_tools meta-tool. */
-  searchTools: (query: string, limit: number) =>
+  searchTools: (query: string, limit: number, mode?: 'lexical' | 'decision') =>
     request<{
       tools: Array<
-        ToolMeta & { serverName: string; serverId: string; score: number }
+        ToolMeta & { serverName: string; serverId: string; score: number; lexicalScore?: number }
       >;
+      decision: {
+        used: boolean;
+        provider?: string;
+        none?: boolean;
+        confidence?: number;
+        fallback: string | null;
+        latencyMs?: number;
+        error?: string;
+        forced?: boolean;
+      } | null;
     }>('/tools/search', {
       method: 'POST',
-      body: JSON.stringify({ query, limit }),
+      body: JSON.stringify({ query, limit, ...(mode ? { mode } : {}) }),
     }),
 };
 

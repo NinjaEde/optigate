@@ -7,6 +7,10 @@ import { useT } from '../i18n';
 const inputClass =
   'w-full rounded-lg border border-line bg-stage px-3 py-2 text-sm outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 disabled:opacity-60';
 
+/** Server masks stored secret values with this marker. NOTE: must match
+ * SECRET_MASK in server/src/services/settingsService.ts. */
+const SECRET_MASK = '••••••••';
+
 const sourceStyles: Record<Setting['source'], string> = {
   db: 'bg-indigo-500/10 text-indigo-300',
   env: 'bg-amber-500/10 text-amber-300',
@@ -58,6 +62,15 @@ export function SettingsView({ role }: { role: string | null }) {
   }
 
   async function save(key: string) {
+    const target = settings.find((s) => s.key === key);
+    // masked draft = unchanged secret; sending it would be rejected anyway
+    if (target?.type === 'secret' && drafts[key] === SECRET_MASK) {
+      setSavedKey(key);
+      window.setTimeout(() => {
+        setSavedKey((cur) => (cur === key ? null : cur));
+      }, 2000);
+      return;
+    }
     setBusyKey(key);
     setError(null);
     try {
@@ -147,6 +160,18 @@ export function SettingsView({ role }: { role: string | null }) {
                           }`}
                         />
                       </button>
+                    ) : s.type === 'secret' ? (
+                      <input
+                        type="password"
+                        autoComplete="off"
+                        value={draft === SECRET_MASK ? '' : String(draft)}
+                        placeholder={draft === SECRET_MASK ? SECRET_MASK : ''}
+                        disabled={!editable}
+                        onChange={(e) =>
+                          setDrafts((prev) => ({ ...prev, [s.key]: e.target.value }))
+                        }
+                        className={`${inputClass} max-w-xs font-mono`}
+                      />
                     ) : (
                       <input
                         type={s.type === 'number' ? 'number' : 'text'}

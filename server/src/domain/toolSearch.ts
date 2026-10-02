@@ -58,13 +58,19 @@ export interface SearchableTool extends ToolMeta {
   serverName: string;
 }
 
-/**
- * Rank tools for a query and return the top k.
- * Only tools with score > 0 are returned.
- */
 /** Upper bound for a single retrieval response. */
 export const MAX_SEARCH_LIMIT = 50;
 
+/**
+ * Rank tools for a query and return the top k.
+ * Only tools with score > 0 are returned.
+ *
+ * Scores are normalized to 0..1 (best hit = 1) so the `score` field
+ * carries the same meaning as decision-model probabilities: relative
+ * relevance, ordered best-first. Raw points are query-length dependent
+ * and were never comparable across queries; normalization additionally
+ * keeps mixed lexical/model responses in `mode="decision"` on one scale.
+ */
 export function searchTools(
   tools: SearchableTool[],
   query: string,
@@ -75,9 +81,11 @@ export function searchTools(
   }
   // clamp: NaN/negative/oversized limits become a sane bounded value
   const n = Math.min(Math.max(1, Math.floor(limit) || 1), MAX_SEARCH_LIMIT);
-  return tools
+  const ranked = tools
     .map((tool) => ({ ...tool, score: scoreTool(tool, query) }))
     .filter((t) => t.score > 0)
     .sort((a, b) => b.score - a.score)
     .slice(0, n);
+  const best = ranked[0]?.score ?? 1;
+  return ranked.map((t) => ({ ...t, score: t.score / best }));
 }

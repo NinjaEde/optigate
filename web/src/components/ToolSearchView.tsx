@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react';
-import { Search, Loader2, Wrench } from 'lucide-react';
+import { Search, Loader2, Wrench, Sparkles, TriangleAlert } from 'lucide-react';
 
 import { api, type ToolMeta } from '../api';
 import { useT } from '../i18n';
@@ -8,9 +8,23 @@ interface SearchResult extends ToolMeta {
   serverName: string;
   serverId: string;
   score: number;
+  lexicalScore?: number;
+}
+
+interface DecisionMeta {
+  used: boolean;
+  provider?: string;
+  none?: boolean;
+  confidence?: number;
+  fallback: string | null;
+  latencyMs?: number;
+  error?: string;
+  forced?: boolean;
 }
 
 const LIMIT = 8;
+
+type SearchMode = 'lexical' | 'decision';
 
 /**
  * "Was sieht ein Agent?" — Tool-Suche über exakt denselben Retrieval-Pfad,
@@ -20,7 +34,9 @@ const LIMIT = 8;
 export function ToolSearchView() {
   const t = useT();
   const [query, setQuery] = useState('');
+  const [mode, setMode] = useState<SearchMode>('lexical');
   const [results, setResults] = useState<SearchResult[] | null>(null);
+  const [decision, setDecision] = useState<DecisionMeta | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // monotonically increasing id: only the latest request may settle state
@@ -43,15 +59,26 @@ export function ToolSearchView() {
     setBusy(true);
     setError(null);
     setResults(null);
+    setDecision(null);
 
     try {
-      const { tools } = await api.searchTools(q, LIMIT);
-      apply(() => setResults(tools));
+      const res = await api.searchTools(q, LIMIT, mode);
+      apply(() => {
+        setResults(res.tools);
+        setDecision(res.decision);
+      });
     } catch (err) {
       apply(() => setError((err as Error).message));
     } finally {
       apply(() => setBusy(false));
     }
+  }
+
+  function switchMode(next: SearchMode) {
+    setMode(next);
+    // stale results belong to the other mode
+    setResults(null);
+    setDecision(null);
   }
 
   return (
@@ -85,6 +112,29 @@ export function ToolSearchView() {
                        placeholder:text-faint focus:border-action/60"
           />
         </label>
+        <div
+          role="group"
+          aria-label="search mode"
+          title={t.toolSearch.modeHint}
+          className="inline-flex items-center rounded-lg border border-line bg-panel/60 p-0.5 text-xs font-medium"
+        >
+          {(['lexical', 'decision'] as const).map((m) => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => switchMode(m)}
+              aria-pressed={mode === m}
+              className={`inline-flex items-center gap-1 rounded-md px-2.5 py-2 transition ${
+                mode === m
+                  ? 'bg-action text-white'
+                  : 'text-muted hover:text-ink'
+              }`}
+            >
+              {m === 'decision' && <Sparkles size={12} aria-hidden="true" />}
+              {m === 'lexical' ? t.toolSearch.modeLexical : t.toolSearch.modeDecision}
+            </button>
+          ))}
+        </div>
         <button
           type="submit"
           disabled={busy || !query.trim()}
@@ -111,16 +161,42 @@ export function ToolSearchView() {
         <div className="overflow-hidden rounded-xl border border-line bg-panel/80">
           <p className="border-b border-line px-5 py-3 text-xs uppercase tracking-wider text-muted">
             {results.length} {t.toolSearch.resultsHeader}
+            {decision?.used && decision.provider && (
+              <span className="ml-2 inline-flex items-center gap-1 normal-case tracking-normal text-indigo-300">
+                <Sparkles size={11} aria-hidden="true" />
+                {t.toolSearch.decisionUsed(decision.provider, decision.latencyMs ?? 0)}
+              </span>
+            )}
           </p>
+          {decision && !decision.used && decision.fallback && mode === 'decision' && (
+            <p className="flex items-center gap-2 border-b border-line bg-amber-500/10 px-5 py-2.5 text-xs text-amber-300">
+              <TriangleAlert size={13} aria-hidden="true" className="shrink-0" />
+              <span>
+                {t.toolSearch.decisionFallback(decision.fallback)}
+                {decision.error && (
+                  <span className="mt-0.5 block font-mono text-amber-300/70">{decision.error}</span>
+                )}
+              </span>
+            </p>
+          )}
+          {decision?.none && (
+            <p className="border-b border-line bg-indigo-500/10 px-5 py-2.5 text-xs text-indigo-300">
+              {t.toolSearch.decisionNone(decision.confidence ?? 0)}
+            </p>
+          )}
           <ul className="divide-y divide-line/50">
             {results.map((r) => (
               <li key={`${r.serverId}/${r.name}`} className="flex items-start gap-4 px-5 py-3.5">
                 <span
                   className="mt-0.5 inline-flex min-w-[2.5rem] shrink-0 justify-center rounded-md
                              bg-action/15 px-1.5 py-1 font-mono text-xs font-semibold text-indigo-300"
-                  title={t.toolSearch.scoreTitle}
+                  title={
+                    r.lexicalScore !== undefined
+                      ? `${t.toolSearch.scoreTitle} · lexical ${r.lexicalScore}`
+                      : t.toolSearch.scoreTitle
+                  }
                 >
-                  {r.score}
+                  {Number(r.score.toFixed(2))}
                 </span>
 
                 <div className="min-w-0 flex-1">

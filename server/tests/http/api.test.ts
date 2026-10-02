@@ -213,8 +213,7 @@ describe('REST API', () => {
     expect(res.json().status).toBe('healthy');
   });
 
-  it('returns tool search results scoped to visible servers', async () => {
-    // register two servers with cached tools
+  it('returns tool search results scoped to visible servers', async () => {    // register two servers with cached tools
     const regA = await app.inject({
       method: 'POST',
       url: '/api/servers',
@@ -237,6 +236,64 @@ describe('REST API', () => {
     });
     expect(search.statusCode).toBe(200);
     expect(Array.isArray(search.json().tools)).toBe(true);
+  });
+
+  it('returns decision metadata on /api/tools/search', async () => {
+    // lexical (default): single-stage path, no decision block
+    const lexical = await app.inject({
+      method: 'POST',
+      url: '/api/tools/search',
+      payload: { query: 'stock', limit: 5 },
+      headers: { 'x-test-user': 'admin' },
+    });
+    expect(lexical.statusCode).toBe(200);
+    expect(lexical.json().decision).toBeNull();
+
+    // decision mode without configuration: lexical results + disabled marker
+    const disabled = await app.inject({
+      method: 'POST',
+      url: '/api/tools/search',
+      payload: { query: 'stock', limit: 5, mode: 'decision' },
+      headers: { 'x-test-user': 'admin' },
+    });
+    expect(disabled.statusCode).toBe(200);
+    expect(Array.isArray(disabled.json().tools)).toBe(true);
+    expect(disabled.json().decision).toMatchObject({ used: false, fallback: 'disabled' });
+
+    // unknown mode values are rejected, like the gateway does
+    const bogus = await app.inject({
+      method: 'POST',
+      url: '/api/tools/search',
+      payload: { query: 'stock', limit: 5, mode: 'quantum' },
+      headers: { 'x-test-user': 'admin' },
+    });
+    expect(bogus.statusCode).toBe(400);
+    expect(bogus.json().error).toContain('mode');
+  });
+
+  it('forces decision search server-side when configured', async () => {
+    const enable = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/decisionModel.forceWhenConfigured',
+      payload: { value: true },
+      headers: { 'x-test-user': 'super' },
+    });
+    expect(enable.statusCode).toBe(200);
+
+    // lexical request is rerouted through the decision path (no model
+    // configured here → disabled fallback, flagged as forced)
+    const forced = await app.inject({
+      method: 'POST',
+      url: '/api/tools/search',
+      payload: { query: 'stock', limit: 5 },
+      headers: { 'x-test-user': 'admin' },
+    });
+    expect(forced.statusCode).toBe(200);
+    expect(forced.json().decision).toMatchObject({
+      used: false,
+      fallback: 'disabled',
+      forced: true,
+    });
   });
 
   describe('credential bindings API', () => {
