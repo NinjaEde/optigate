@@ -12,6 +12,8 @@
 servers — with token-sparing tool retrieval built in.
 Optional: with **decision-model based reranking**.
 
+📚 **Documentation:** https://ninjaede.github.io/optigate
+
 OptiGate is a self-hosted MCP (Model Context Protocol) server registry and
 gateway for LLM tools. It manages your MCP servers (registration, health,
 approval workflow, audit, per‑tenant credential isolation) and exposes them

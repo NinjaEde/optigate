@@ -4,6 +4,8 @@ node_modules/
 # Builds
 server/dist/
 web/dist/
+docs/.vitepress/dist/
+docs/.vitepress/cache/
 
 # Environment / secrets
 .env
